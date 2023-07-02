@@ -90,6 +90,13 @@ conda activate p311-sdxl
 
 **Ensure you have activated the environment you created above.**
 
+Install dependencies:
+
+```bash
+pip install -r requirements_diffusers.txt
+pip install invisible-watermark --no-deps
+```
+
 (Optional) treat yourself to latest nightly of PyTorch, with support for Python 3.11 and CUDA 12.1:
 
 ```bash
@@ -99,12 +106,6 @@ pip install --upgrade --pre torch torchvision --extra-index-url https://download
 pip install --upgrade --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 ```
 
-Install dependencies:
-
-```bash
-pip install -r requirements_inference.txt
-```
-
 We deliberately avoid installing `generative-models`' requirements files, as lots of the dependencies there exist to support training or watermarking.
 
 ## Run:
@@ -112,7 +113,7 @@ We deliberately avoid installing `generative-models`' requirements files, as lot
 From root of repository:
 
 ```bash
-python -m scripts.sdxl_play
+python -m scripts.sdxl_diffusers_play
 ```
 
 ## License

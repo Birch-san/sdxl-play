@@ -9,7 +9,14 @@
       "type": "python",
       "request": "launch",
       "module": "scripts.sdxl_play",
-      "justMyCode": true,
-    }
+      "justMyCode": false,
+    },
+    {
+      "name": "Python: SDXL Diffusers Play",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.sdxl_diffusers_play",
+      "justMyCode": false,
+    },
   ]
 }
