@@ -27,17 +27,15 @@ prompt = "An astronaut riding a green horse"
 
 seed=42
 torch.manual_seed(seed)
-with no_grad(), sdp_kernel(enable_math=False):
+with torch.inference_mode(), sdp_kernel(enable_math=False):
   base_images: FloatTensor = pipe(prompt=prompt, output_type="latent").images
 base_images_scaled: FloatTensor = base_images / vae.config.scaling_factor
 
 
-with no_grad():#, sdp_kernel(enable_math=False):
+with torch.inference_mode():#, sdp_kernel(enable_math=False):
   decoder_out: DecoderOutput = vae.decode(base_images_scaled.to(vae.dtype))
-  sample: FloatTensor = decoder_out.sample
-  # normalize
-  sample: FloatTensor = sample - sample.min()
-  sample: FloatTensor = sample / sample.max()
+  sample: FloatTensor = decoder_out.sample#.clone()
+  sample = ((sample / 2) + 0.5).clamp(0,1)
 
   for ix, decoded in enumerate(sample):
     save_image(decoded, f'out/base_{ix}_{prompt}.{seed}.png')
@@ -57,7 +55,7 @@ pipe.to('cuda')#, dtype=torch.bfloat16)
 
 torch.manual_seed(seed)
 base_image, *_ = base_images
-with no_grad():#, sdp_kernel(enable_math=False):
+with torch.inference_mode():#, sdp_kernel(enable_math=False):
   refined_images: List[Image.Image] = pipe(prompt=prompt, image=base_image).images
 
 for ix, image in enumerate(refined_images):

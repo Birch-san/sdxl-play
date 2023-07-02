@@ -18,5 +18,12 @@
       "module": "scripts.sdxl_diffusers_play",
       "justMyCode": false,
     },
+    {
+      "name": "Python: SDXL Diffusers Play 2",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.sdxl_diffusers_play_2",
+      "justMyCode": false,
+    },
   ]
 }
