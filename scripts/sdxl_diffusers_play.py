@@ -23,7 +23,7 @@ pipe: StableDiffusionXLPipeline = DiffusionPipeline.from_pretrained(
 )
 pipe.to('cuda')
 
-prompt = "An astronaut riding a green horse"
+prompt = "my anime waifu is so cute"
 
 seed=42
 torch.manual_seed(seed)
@@ -36,7 +36,7 @@ with no_grad():#, sdp_kernel(enable_math=False):
   decoder_out: DecoderOutput = vae.decode(base_images_scaled.to(vae.dtype))
   sample: FloatTensor = decoder_out.sample
   for ix, decoded in enumerate(sample):
-    save_image(decoded, f'out/base_{ix}.png')
+    save_image(decoded, f'out/base_{ix}_{prompt}.{seed}.png')
 
 pipe: StableDiffusionXLImg2ImgPipeline = DiffusionPipeline.from_pretrained(
   "stabilityai/stable-diffusion-xl-refiner-0.9",
@@ -57,7 +57,7 @@ with no_grad():#, sdp_kernel(enable_math=False):
   refined_images: List[Image.Image] = pipe(prompt=prompt, image=base_image).images
 
 for ix, image in enumerate(refined_images):
-  image.save(f'out/refined_{ix}.png')
+  image.save(f'out/refined_{ix}_{prompt}.{seed}.png')
 
 # leaving this commented-out in case I can find a way to access the refined Unet output directly (the pipeline currently decodes it for you)
 # refined_images_scaled: FloatTensor = refined_images / vae.config.scaling_factor
