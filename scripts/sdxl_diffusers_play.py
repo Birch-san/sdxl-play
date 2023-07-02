@@ -23,7 +23,7 @@ pipe: StableDiffusionXLPipeline = DiffusionPipeline.from_pretrained(
 )
 pipe.to('cuda')
 
-prompt = "my anime waifu is so cute"
+prompt = "An astronaut riding a green horse"
 
 seed=42
 torch.manual_seed(seed)
@@ -35,6 +35,10 @@ base_images_scaled: FloatTensor = base_images / vae.config.scaling_factor
 with no_grad():#, sdp_kernel(enable_math=False):
   decoder_out: DecoderOutput = vae.decode(base_images_scaled.to(vae.dtype))
   sample: FloatTensor = decoder_out.sample
+  # normalize
+  sample: FloatTensor = sample - sample.min()
+  sample: FloatTensor = sample / sample.max()
+
   for ix, decoded in enumerate(sample):
     save_image(decoded, f'out/base_{ix}_{prompt}.{seed}.png')
 
