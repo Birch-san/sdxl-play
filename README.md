@@ -94,9 +94,9 @@ conda activate p311-sdxl
 
 ```bash
 # CUDA
-pip install --upgrade --pre torch --extra-index-url https://download.pytorch.org/whl/nightly/cu121
+pip install --upgrade --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cu121
 # Mac
-pip install --upgrade --pre torch --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+pip install --upgrade --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 ```
 
 Install dependencies:
@@ -112,7 +112,7 @@ We deliberately avoid installing `generative-models`' requirements files, as lot
 From root of repository:
 
 ```bash
-PYTHONPATH="src:lib/generative-models:$PYTHONPATH" python -m scripts.sdxl_play
+python -m scripts.sdxl_play
 ```
 
 ## License
