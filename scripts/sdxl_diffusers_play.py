@@ -37,12 +37,13 @@ base_height_px = height_px
 vae: AutoencoderKL = pipe.vae
 vae.enable_slicing()
 
+prompt = "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
 # prompt = "90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind"
-prompt = "90s anime promo art, girl wearing serafuku walking home, masterpiece, dramatic, wind"
+# prompt = "90s anime promo art, girl wearing serafuku walking home, masterpiece, dramatic, wind"
 # prompt = "An astronaut riding a green horse"
 # prompt = "my anime waifu is so cute"
 
-seed=42
+seed=0
 torch.manual_seed(seed)
 with torch.inference_mode(), sdp_kernel(enable_math=False):
   base_images: FloatTensor = pipe(prompt=prompt, output_type="latent", width=base_width_px, height=base_height_px).images
@@ -86,9 +87,11 @@ if base_width_px != width_px or base_height_px != height_px:
 else:
   base_image, *_ = base_images
 
-torch.manual_seed(seed)
+refiner_seed=1024
+torch.manual_seed(refiner_seed)
+strength=0.3
 with torch.inference_mode():
-  refined_images: List[Image.Image] = pipe(prompt=prompt, image=base_image).images
+  refined_images: List[Image.Image] = pipe(prompt=prompt, image=base_image, strength=strength).images
 
 for ix, image in enumerate(refined_images):
-  image.save(f'out/refined_{ix}_{prompt}.{seed}.png')
+  image.save(f'out/refined_{ix}_{prompt}.{seed}.s{refiner_seed}.str{strength:.1f}.png')
