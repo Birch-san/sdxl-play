@@ -25,5 +25,12 @@
       "module": "scripts.sdxl_diffusers_play_2",
       "justMyCode": false,
     },
+    {
+      "name": "Python: SDXL k-diffusion Play",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.sdxl_kdiff_play",
+      "justMyCode": false,
+    },
   ]
 }

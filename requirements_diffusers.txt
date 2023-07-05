@@ -11,3 +11,4 @@ onnxruntime
 # (see https://github.com/pypa/pip/pull/10837)
 # so you should install this manualy
 # invisible-watermark --no-deps
+k-diffusion>=0.0.15
