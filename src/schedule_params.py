@@ -1,13 +1,13 @@
 import torch
 from torch import Tensor, cumprod, linspace, argmin
-from typing import Optional, Union
+from typing import Optional
 from .device import DeviceType
 
 def get_betas(
   num_train_timesteps: int = 1000,
   beta_start: float = 0.00085,
   beta_end: float = 0.012,
-  device: Optional[Union[DeviceType, torch.device]] = None,
+  device: Optional[DeviceType] = None,
   dtype: torch.dtype = torch.float32,
 ) -> Tensor:
   return linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=dtype, device=device) ** 2

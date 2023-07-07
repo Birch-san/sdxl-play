@@ -1,13 +1,20 @@
 from diffusers import UNet2DConditionModel, AutoencoderKL
+from diffusers.models.vae import DecoderOutput
 from transformers import CLIPTextModel, CLIPTokenizer, BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 import torch
-from torch import FloatTensor, tensor, inference_mode
+from torch import FloatTensor, Generator, tensor, inference_mode, randn
+from torchvision.utils import save_image
 from typing import List
 from logging import getLogger, Logger
+from k_diffusion.sampling import BrownianTreeNoiseSampler, get_sigmas_karras, sample_dpmpp_2m, sample_dpmpp_2m_sde
+
 from src.denoisers.v_denoiser import VDenoiser
+from src.denoisers.cfg_denoiser import CFGDenoiser, CondKwargs
 from src.device import DeviceType, get_device_type
+from src.schedules import KarrasScheduleParams, KarrasScheduleTemplate, get_template_schedule
 from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas
+from src.latents_shape import LatentsShape
 
 logger: Logger = getLogger(__file__)
 
@@ -26,6 +33,7 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
 ).eval() for expert in ('base')]
 # base_unet.to(device).eval()
 base_unet, *_ = unets
+# base_unet = torch.compile(base_unet, mode="reduce-overhead", fullgraph=True)
 
 tokenizers: List[CLIPTokenizer] = [CLIPTokenizer.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
@@ -46,12 +54,13 @@ vit_l, vit_big_g = text_encoders
 
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
-  torch_dtype=torch.float16,
+  # torch_dtype=torch.float16,
+  torch_dtype=torch.bfloat16,
   use_safetensors=True,
   variant='fp16',
   subfolder='vae',
 )
-vae_scale_factor: int = 2 ** (len(vae.config.block_out_channels) - 1)
+vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
 # vae_scale_factor=8
 
 def round_down(num: int, divisor: int) -> int:
@@ -102,3 +111,68 @@ emb_vit_l, emb_vit_big_g = embeddings
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
 unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
+
+added_cond_kwargs = CondKwargs(
+  text_embeds=None, # TODO
+  time_ids=None, # TODO
+)
+
+denoiser = CFGDenoiser(
+  denoiser=unet_k_wrapped,
+  cross_attention_conds=embedding,
+  added_cond_kwargs=added_cond_kwargs,
+)
+
+schedule_template = KarrasScheduleTemplate.Mastering
+schedule: KarrasScheduleParams = get_template_schedule(
+  schedule_template,
+  model_sigma_min=unet_k_wrapped.sigma_min,
+  model_sigma_max=unet_k_wrapped.sigma_max,
+  device=unet_k_wrapped.sigmas.device,
+  dtype=unet_k_wrapped.sigmas.dtype,
+)
+
+steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
+sigmas: FloatTensor = get_sigmas_karras(
+  n=steps,
+  sigma_max=sigma_max.cpu(),
+  sigma_min=sigma_min.cpu(),
+  rho=rho,
+  device=device,
+).to(sampling_dtype)
+
+latents_shape = LatentsShape(base_unet.in_channels, height_lt, width_lt)
+
+seed = 42
+generator = Generator(device='cpu')
+
+latents = randn((1, latents_shape.channels, latents_shape.height, latents_shape.width), dtype=sampling_dtype, device='cpu', generator=generator).to(device)
+latents *= sigmas[0]
+
+noise_sampler = BrownianTreeNoiseSampler(
+  latents,
+  # rather than using the sigma_{min,max} vars we already have:
+  # refer to sigmas array, which can be truncated (e.g. if we were doing img2img)
+  # we grab *penultimate* sigma_min, because final sigma is always 0
+  sigma_min=sigmas[-2],
+  sigma_max=sigmas[0],
+  # there's no requirement that the noise sampler's seed be coupled to the init noise seed;
+  # I'm just re-using it because it's a convenient arbitrary number
+  seed=seed,
+)
+
+denoised_latents: FloatTensor = sample_dpmpp_2m(
+  denoiser,
+  latents,
+  sigmas,
+  # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers
+  # callback=callback,
+).to(vae.dtype)
+
+denoised_latents = denoised_latents / vae.config.scaling_factor
+
+with inference_mode():#, sdp_kernel(enable_math=False):
+  decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
+  sample: FloatTensor = decoder_out.sample
+  for ix, decoded in enumerate(sample):
+    save_image(decoded, f'out/refined_{ix}.png') 
