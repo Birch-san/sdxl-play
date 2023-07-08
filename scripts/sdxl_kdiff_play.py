@@ -9,9 +9,15 @@ from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from torchvision.utils import save_image
-from typing import List, Union, Optional
+from torchvision.transforms.functional import to_pil_image
+from typing import List, Union, Optional, Callable
 from logging import getLogger, Logger
 from k_diffusion.sampling import BrownianTreeNoiseSampler, get_sigmas_karras, sample_dpmpp_2m, sample_dpmpp_2m_sde
+from os import makedirs, listdir
+from os.path import join
+import fnmatch
+from pathlib import Path
+from PIL import Image
 
 from src.denoisers.eps_denoiser import EPSDenoiser
 from src.denoisers.cfg_denoiser import CFGDenoiser
@@ -23,6 +29,7 @@ from src.added_cond import CondKwargs
 from src.dimensions import Dimensions
 from src.time_ids import get_time_ids
 from src.device_ctx import to_device
+from src.rgb_to_pil import rgb_to_pil
 
 logger: Logger = getLogger(__file__)
 
@@ -261,6 +268,23 @@ vae.to(device)
 # cannot use flash attn because VAE decoder's self-attn has head_dim 512
 with inference_mode():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
   decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
+
+out_dir = 'out'
+makedirs(out_dir, exist_ok=True)
+# intermediates_dir=join(out_dir, 'intermediates')
+# makedirs(intermediates_dir, exist_ok=True)
+
+out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
+get_out_ix: Callable[[str], int] = lambda stem: int(stem.split('_', maxsplit=1)[0])
+out_keyer: Callable[[str], int] = lambda fname: get_out_ix(Path(fname).stem)
+out_imgs: List[str] = sorted(out_imgs_unsorted, key=out_keyer)
+next_ix = get_out_ix(Path(out_imgs[-1]).stem)+1 if out_imgs else 0
+out_stem: str = f'{next_ix:05d}_base_{prompt.split(",")[0]}_{seed}'
+
 sample: FloatTensor = decoder_out.sample
 for ix, decoded in enumerate(sample):
-  save_image(decoded, f'out/base_{ix}.png') 
+  # if you want lossless images: consider png
+  out_name: str = join(out_dir, f'{out_stem}.jpg')
+  img: Image = rgb_to_pil(decoded)
+  img.save(out_name, subsampling=0, quality=95)
+  print(f'Saved image: {out_name}')
