@@ -11,9 +11,5 @@ def get_time_ids(
   device: DeviceType = torch.device('cpu'),
 ) -> FloatTensor:
   return tensor([
-    [list(tup) for tup in (
-      original_size,
-      crop_coords_top_left,
-      target_size,
-    )]
+    [dim for tup in (original_size, crop_coords_top_left, target_size) for dim in tup]
   ], device=device, dtype=dtype)

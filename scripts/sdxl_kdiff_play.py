@@ -150,7 +150,7 @@ time_ids: FloatTensor = get_time_ids(
 
 added_cond_kwargs = CondKwargs(
   text_embeds=emb_vit_big_g,
-  time_ids=time_ids,
+  time_ids=time_ids.expand(emb_vit_big_g.size(0), -1),
 )
 
 denoiser = CFGDenoiser(
