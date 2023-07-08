@@ -279,6 +279,8 @@ with inference_mode(), to_device(base_unet, device), sdp_kernel(enable_math=Fals
 
 denoised_latents = denoised_latents / vae.config.scaling_factor
 
+# we avoid using our to_device() context manager, because we have no further large tasks;
+# don't want to pay to transfer VAE back to CPU upon context exit
 vae.to(device)
 # cannot use flash attn because VAE decoder's self-attn has head_dim 512
 with inference_mode():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
