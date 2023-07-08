@@ -5,7 +5,8 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import FloatTensor, Generator, inference_mode, cat, randn, tensor
+from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor
+from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from torchvision.utils import save_image
 from typing import List, Union, Optional
@@ -114,9 +115,15 @@ crop_coords_top_left = Dimensions(0, 0)
 batch_size = 1
 cfg_scale = 5.
 
-uncond_prompt: str = ''
+force_zeros_for_empty_prompt = True
+uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
+
+negative_prompt: Optional[str] = uncond_prompt
 prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
-prompts: List[str] = [uncond_prompt, prompt]
+prompts: List[str] = [
+  *([] if negative_prompt is None else [negative_prompt]),
+  prompt,
+]
 
 tokenizeds: List[BatchEncoding] = [tokenizer(
   prompts,
@@ -129,6 +136,7 @@ enc_vit_l, enc_vit_big_g = tokenizeds
 
 # we expect to get one embedding (of penultimate hidden states) per text encoder
 embeddings: List[FloatTensor] = []
+embedding_masks: List[BoolTensor] = []
 # we expect to get just one pooled embedding, from vit_big_g
 pooled_embed: Optional[FloatTensor] = None
 for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenizeds, tokenizers, text_encoders)):
@@ -140,13 +148,15 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
       logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
 
   input_ids=tensor(tokenized.input_ids, device=device)
-  attention_mask=tensor(tokenized.attention_mask, device=device)
+  attention_mask=tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
+  embedding_masks.append(attention_mask)
 
   with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
     assert isinstance(text_encoder, CLIPTextModel) or isinstance(text_encoder, CLIPTextModelWithProjection), f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection'
     encoder_out: Union[BaseModelOutputWithPooling, CLIPTextModelOutput] = text_encoder(
       input_ids=input_ids,
-      attention_mask=attention_mask,
+      # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+      # attention_mask=attention_mask,
       output_hidden_states=True,
       return_dict=True,
     )
@@ -158,6 +168,18 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
 
 assert pooled_embed is not None
 concat_embed: FloatTensor = cat(embeddings, dim=-1)
+embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
+
+if negative_prompt is None and cfg_scale > 1.:
+  # uncond_embed: FloatTensor = zeros((1, *concat_embed.shape[1:]), dtype=concat_embed.dtype, device=device)
+  # concat_embed = cat([uncond_embed, concat_embed], dim=0)
+  concat_embed = pad(concat_embed, pad=(0,0, 0,0, 1,0), mode='constant')
+
+  # uncond_pooled: FloatTensor = zeros((1, *pooled_embed.shape[1:]), dtype=pooled_embed.dtype, device=device)
+  # pooled_embed = cat([uncond_pooled, pooled_embed], dim=0)
+  pooled_embed = pad(pooled_embed, pad=(0,0, 1,0), mode='constant')
+
+  embedding_mask = pad(pooled_embed, pad=(0,0, 1,0), mode='constant', value=True)
 
 time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
@@ -179,6 +201,8 @@ denoiser = CFGDenoiser(
   denoiser=unet_k_wrapped,
   cross_attention_conds=concat_embed,
   added_cond_kwargs=added_cond_kwargs,
+  # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+  # cross_attention_mask=embedding_mask,
 )
 
 schedule_template = KarrasScheduleTemplate.Mastering
