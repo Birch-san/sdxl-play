@@ -1,8 +1,9 @@
 from contextlib import nullcontext
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
-from transformers import CLIPTextModel, CLIPTokenizer, BatchEncoding
+from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
+from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
 from torch import FloatTensor, Generator, tensor, inference_mode, randn
 from torch.backends.cuda import sdp_kernel
@@ -48,14 +49,23 @@ tok_vit_l, tok_vit_big_g = tokenizers
 
 # base uses ViT-L **and** ViT-bigG
 # refiner uses just ViT-bigG
-text_encoders: List[CLIPTextModel] = [CLIPTextModel.from_pretrained(
+vit_l: CLIPTextModel = CLIPTextModel.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
   torch_dtype=torch.float16,
   use_safetensors=True,
   variant='fp16',
-  subfolder=subfolder,
-).eval() for subfolder in ('text_encoder', 'text_encoder_2')]
-vit_l, vit_big_g = text_encoders
+  subfolder='text_encoder',
+).eval()
+
+vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretrained(
+  'stabilityai/stable-diffusion-xl-base-0.9',
+  torch_dtype=torch.float16,
+  use_safetensors=True,
+  variant='fp16',
+  subfolder='text_encoder_2',
+).eval()
+
+text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
@@ -117,23 +127,36 @@ tokenizeds: List[BatchEncoding] = [tokenizer(
 ) for tokenizer in tokenizers]
 enc_vit_l, enc_vit_big_g = tokenizeds
 
-wants_pooleds=(False, True)
 embeddings: List[FloatTensor] = []
-for tokenizer_ix, (tokenized, tokenizer, text_encoder, wants_pooled) in enumerate(zip(tokenizeds, tokenizers, text_encoders, wants_pooleds)):
+for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenizeds, tokenizers, text_encoders)):
   overflows: List[List[int]] = tokenized.data['overflowing_tokens']
   overflows_decoded: List[str] = tokenizer.batch_decode(overflows)
   num_truncateds: List[int] = tokenized.data['num_truncated_tokens']
   for prompt_ix, (overflow_decoded, num_truncated) in enumerate(zip(overflows_decoded, num_truncateds)):
     if num_truncated > 0:
       logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
+
+  input_ids=tensor(tokenized.input_ids, device=device)
+  attention_mask=tensor(tokenized.attention_mask, device=device)
+
   with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
-    encoder_out: BaseModelOutputWithPooling = text_encoder.forward(
-      input_ids=tensor(tokenized.input_ids, device=device),
-      attention_mask=tensor(tokenized.attention_mask, device=device),
-      output_hidden_states=not wants_pooled,
-      return_dict=True,
-    )
-  embedding: FloatTensor = encoder_out.last_hidden_state if wants_pooled else encoder_out.hidden_states[-2]
+    if isinstance(text_encoder, CLIPTextModel): # vit_l
+      encoder_out: BaseModelOutputWithPooling = text_encoder.forward(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+        return_dict=True,
+      )
+      embedding: FloatTensor = encoder_out.hidden_states[-2]
+    elif isinstance(text_encoder, CLIPTextModelWithProjection): # vit_big_g
+      encoder_out: CLIPTextModelOutput = text_encoder.forward(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        return_dict=True,
+      )
+      embedding: FloatTensor = encoder_out.text_embeds
+    else:
+      raise ValueError(f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection')
   embeddings.append(embedding)
 emb_vit_l, emb_vit_big_g = embeddings
 
@@ -200,6 +223,7 @@ noise_sampler = BrownianTreeNoiseSampler(
 )
 
 with inference_mode(), to_device(base_unet, device), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
+  # TODO: guidance_rescale
   denoised_latents: FloatTensor = sample_dpmpp_2m(
     denoiser,
     latents,
