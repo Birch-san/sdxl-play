@@ -137,9 +137,6 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder, wants_pooled) in enumerat
   embeddings.append(embedding)
 emb_vit_l, emb_vit_big_g = embeddings
 
-alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
-unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
-
 time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
   crop_coords_top_left=crop_coords_top_left,
@@ -152,6 +149,9 @@ added_cond_kwargs = CondKwargs(
   text_embeds=emb_vit_big_g,
   time_ids=time_ids.expand(emb_vit_big_g.size(0), -1),
 )
+
+alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
+unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
 denoiser = CFGDenoiser(
   denoiser=unet_k_wrapped,
