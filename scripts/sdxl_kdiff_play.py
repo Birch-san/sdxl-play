@@ -253,7 +253,7 @@ latents_shape = LatentsShape(base_unet.in_channels, height_lt, width_lt)
 
 seed = 42
 # we generate with CPU random so that results can be reproduced across platforms
-generator = Generator(device='cpu')
+generator = Generator(device='cpu').manual_seed(seed)
 
 latents = randn((1, latents_shape.channels, latents_shape.height, latents_shape.width), dtype=sampling_dtype, device='cpu', generator=generator).to(device)
 latents *= start_sigma
