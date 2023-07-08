@@ -1,5 +1,5 @@
 from torch import FloatTensor, BoolTensor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 from .denoiser_proto import Denoiser
@@ -9,7 +9,7 @@ class CFGDenoiser:
   denoiser: Denoiser
   cross_attention_conds: FloatTensor
   cfg_scale: float = 5.
-  added_cond_kwargs: Dict[str, Any] = {}
+  added_cond_kwargs: Dict[str, Any] = field(default_factory={})
   cross_attention_mask: Optional[BoolTensor] = None
 
   def __call__(

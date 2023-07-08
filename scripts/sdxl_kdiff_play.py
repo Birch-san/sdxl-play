@@ -36,7 +36,7 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   use_safetensors=True,
   variant='fp16',
   subfolder='unet',
-).eval() for expert in ('base')]
+).eval() for expert in ['base',]]
 base_unet, *_ = unets
 # base_unet = torch.compile(base_unet, mode="reduce-overhead", fullgraph=True)
 
@@ -133,7 +133,7 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder, wants_pooled) in enumerat
       output_hidden_states=not wants_pooled,
       return_dict=True,
     )
-  embedding: FloatTensor = encoder_out.last_hidden_state if wants_pooled else encoder_out.hidden_states[-2],
+  embedding: FloatTensor = encoder_out.last_hidden_state if wants_pooled else encoder_out.hidden_states[-2]
   embeddings.append(embedding)
 emb_vit_l, emb_vit_big_g = embeddings
 
@@ -209,8 +209,6 @@ with inference_mode(), to_device(base_unet, device), sdp_kernel(enable_math=Fals
   ).to(vae.dtype)
 
 denoised_latents = denoised_latents / vae.config.scaling_factor
-
-base_unet.cpu()
 
 vae.to(device)
 # cannot use flash attn because VAE decoder's self-attn has head_dim 512
