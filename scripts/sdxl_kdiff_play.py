@@ -5,10 +5,10 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import FloatTensor, Generator, tensor, inference_mode, randn
+from torch import FloatTensor, Generator, inference_mode, cat, randn, tensor
 from torch.backends.cuda import sdp_kernel
 from torchvision.utils import save_image
-from typing import List
+from typing import List, Union, Optional
 from logging import getLogger, Logger
 from k_diffusion.sampling import BrownianTreeNoiseSampler, get_sigmas_karras, sample_dpmpp_2m, sample_dpmpp_2m_sde
 
@@ -127,7 +127,10 @@ tokenizeds: List[BatchEncoding] = [tokenizer(
 ) for tokenizer in tokenizers]
 enc_vit_l, enc_vit_big_g = tokenizeds
 
+# we expect to get one embedding (of penultimate hidden states) per text encoder
 embeddings: List[FloatTensor] = []
+# we expect to get just one pooled embedding, from vit_big_g
+pooled_embed: Optional[FloatTensor] = None
 for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenizeds, tokenizers, text_encoders)):
   overflows: List[List[int]] = tokenized.data['overflowing_tokens']
   overflows_decoded: List[str] = tokenizer.batch_decode(overflows)
@@ -140,37 +143,33 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
   attention_mask=tensor(tokenized.attention_mask, device=device)
 
   with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
-    if isinstance(text_encoder, CLIPTextModel): # vit_l
-      encoder_out: BaseModelOutputWithPooling = text_encoder.forward(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=True,
-        return_dict=True,
-      )
-      embedding: FloatTensor = encoder_out.hidden_states[-2]
-    elif isinstance(text_encoder, CLIPTextModelWithProjection): # vit_big_g
-      encoder_out: CLIPTextModelOutput = text_encoder.forward(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        return_dict=True,
-      )
-      embedding: FloatTensor = encoder_out.text_embeds
-    else:
-      raise ValueError(f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection')
+    assert isinstance(text_encoder, CLIPTextModel) or isinstance(text_encoder, CLIPTextModelWithProjection), f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection'
+    encoder_out: Union[BaseModelOutputWithPooling, CLIPTextModelOutput] = text_encoder(
+      input_ids=input_ids,
+      attention_mask=attention_mask,
+      output_hidden_states=True,
+      return_dict=True,
+    )
+    embedding: FloatTensor = encoder_out.hidden_states[-2]
+    if isinstance(encoder_out, CLIPTextModelOutput): # returned by CLIPTextModelWithProjection, e.g. vit_big_g
+      assert pooled_embed is None, 'we only expected one of the text encoders (vit_big_g) to be a CLIPTextModelWithProjection capable of providing a pooled embedding.'
+      pooled_embed: FloatTensor = encoder_out.text_embeds
   embeddings.append(embedding)
-emb_vit_l, emb_vit_big_g = embeddings
+
+assert pooled_embed is not None
+concat_embed: FloatTensor = cat(embeddings, dim=-1)
 
 time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
   crop_coords_top_left=crop_coords_top_left,
   target_size=target_size,
-  dtype=emb_vit_l.dtype,
+  dtype=concat_embed.dtype,
   device=device,
 )
 
 added_cond_kwargs = CondKwargs(
-  text_embeds=emb_vit_big_g,
-  time_ids=time_ids.expand(emb_vit_big_g.size(0), -1),
+  text_embeds=pooled_embed,
+  time_ids=time_ids.expand(concat_embed.size(0), -1),
 )
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
@@ -178,7 +177,7 @@ unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
 denoiser = CFGDenoiser(
   denoiser=unet_k_wrapped,
-  cross_attention_conds=embedding,
+  cross_attention_conds=concat_embed,
   added_cond_kwargs=added_cond_kwargs,
 )
 
