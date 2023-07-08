@@ -13,7 +13,7 @@ from typing import List, Union, Optional
 from logging import getLogger, Logger
 from k_diffusion.sampling import BrownianTreeNoiseSampler, get_sigmas_karras, sample_dpmpp_2m, sample_dpmpp_2m_sde
 
-from src.denoisers.v_denoiser import VDenoiser
+from src.denoisers.eps_denoiser import EPSDenoiser
 from src.denoisers.cfg_denoiser import CFGDenoiser
 from src.device import DeviceType, get_device_type
 from src.schedules import KarrasScheduleParams, KarrasScheduleTemplate, get_template_schedule
@@ -195,7 +195,7 @@ added_cond_kwargs = CondKwargs(
 )
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
-unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
+unet_k_wrapped = EPSDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
 denoiser = CFGDenoiser(
   denoiser=unet_k_wrapped,
