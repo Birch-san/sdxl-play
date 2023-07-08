@@ -1,6 +1,5 @@
 import torch
 from torch import FloatTensor, IntTensor
-import PIL
 from PIL import Image
 from numpy.typing import NDArray
 

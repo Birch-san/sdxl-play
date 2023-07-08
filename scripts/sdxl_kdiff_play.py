@@ -128,7 +128,8 @@ force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
 negative_prompt: Optional[str] = uncond_prompt
-prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
+# prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
+prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
 prompts: List[str] = [
   *([] if negative_prompt is None else [negative_prompt]),
   prompt,
@@ -275,8 +276,6 @@ with inference_mode():#, sdp_kernel(enable_math=False) if torch.cuda.is_availabl
 
 out_dir = 'out'
 makedirs(out_dir, exist_ok=True)
-# intermediates_dir=join(out_dir, 'intermediates')
-# makedirs(intermediates_dir, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
 get_out_ix: Callable[[str], int] = lambda stem: int(stem.split('_', maxsplit=1)[0])
@@ -285,7 +284,7 @@ out_imgs: List[str] = sorted(out_imgs_unsorted, key=out_keyer)
 next_ix = get_out_ix(Path(out_imgs[-1]).stem)+1 if out_imgs else 0
 out_stem: str = f'{next_ix:05d}_base_{prompt.split(",")[0]}_{seed}'
 
-sample: FloatTensor = decoder_out.sample
+sample: FloatTensor = decoder_out.sample.div(2).add(.5).clamp(0,1)
 for ix, decoded in enumerate(sample):
   # if you want lossless images: consider png
   out_name: str = join(out_dir, f'{out_stem}.jpg')
