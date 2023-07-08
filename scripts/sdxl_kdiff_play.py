@@ -1,20 +1,26 @@
+from contextlib import nullcontext
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
 from transformers import CLIPTextModel, CLIPTokenizer, BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 import torch
 from torch import FloatTensor, Generator, tensor, inference_mode, randn
+from torch.backends.cuda import sdp_kernel
 from torchvision.utils import save_image
 from typing import List
 from logging import getLogger, Logger
 from k_diffusion.sampling import BrownianTreeNoiseSampler, get_sigmas_karras, sample_dpmpp_2m, sample_dpmpp_2m_sde
 
 from src.denoisers.v_denoiser import VDenoiser
-from src.denoisers.cfg_denoiser import CFGDenoiser, CondKwargs
+from src.denoisers.cfg_denoiser import CFGDenoiser
 from src.device import DeviceType, get_device_type
 from src.schedules import KarrasScheduleParams, KarrasScheduleTemplate, get_template_schedule
 from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas
 from src.latents_shape import LatentsShape
+from src.added_cond import CondKwargs
+from src.dimensions import Dimensions
+from src.time_ids import get_time_ids
+from src.device_ctx import to_device
 
 logger: Logger = getLogger(__file__)
 
@@ -31,7 +37,6 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   variant='fp16',
   subfolder='unet',
 ).eval() for expert in ('base')]
-# base_unet.to(device).eval()
 base_unet, *_ = unets
 # base_unet = torch.compile(base_unet, mode="reduce-overhead", fullgraph=True)
 
@@ -49,17 +54,28 @@ text_encoders: List[CLIPTextModel] = [CLIPTextModel.from_pretrained(
   use_safetensors=True,
   variant='fp16',
   subfolder=subfolder,
-).to(device).eval() for subfolder in ('text_encoder', 'text_encoder_2')]
+).eval() for subfolder in ('text_encoder', 'text_encoder_2')]
 vit_l, vit_big_g = text_encoders
 
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
-  # torch_dtype=torch.float16,
-  torch_dtype=torch.bfloat16,
+  # decoder gets NaN result in float16.
+  # strictly speaking we probably only need to upcast the self-attention in the mid-block,
+  # rather than everything. but diffusers doesn't expose a way to do this.
+  torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
   use_safetensors=True,
   variant='fp16',
   subfolder='vae',
 )
+# the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
+# (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
+# TODO: rather than slicing *everything* (submit smaller image):
+#       would it be faster to just slice the *attention* (serialize into n groups of (batch, head))?
+#       because attention is likely to be the main layer at threat of encountering OOM.
+#       i.e. vae.set_attn_processor(SlicedAttnProcessor())
+vae.enable_slicing()
+# this script won't be using the encoder
+del vae.encoder
 vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
 # vae_scale_factor=8
 
@@ -72,6 +88,18 @@ width_px: int = round_down(1024, 64)
 height_px: int = round_down(area//width_px, 64)
 width_lt: int = width_px // vae_scale_factor
 height_lt: int = height_px // vae_scale_factor
+
+# TODO: is it height, width or the other way around?
+# note: I think these conditions were mainly useful at training time
+# (to teach SDXL to distinguish a native-resolution image from an upscaled one).
+# I think at inference time you just want "a native-resolution image".
+# so I think setting both original and target to (height_px, width_px) makes sense.
+# and crop(0,0) (i.e. a well-framed image) make sense.
+# TODO: should non-square images condition on orig=targ=(height_px, width_px),
+#       or should they use orig=targ=(1024, 1024)?
+original_size = Dimensions(height_px, width_px)
+target_size = Dimensions(height_px, width_px)
+crop_coords_top_left = Dimensions(0, 0)
 
 batch_size = 1
 cfg_scale = 5.
@@ -98,7 +126,7 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder, wants_pooled) in enumerat
   for prompt_ix, (overflow_decoded, num_truncated) in enumerate(zip(overflows_decoded, num_truncateds)):
     if num_truncated > 0:
       logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
-  with inference_mode():
+  with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
     encoder_out: BaseModelOutputWithPooling = text_encoder.forward(
       input_ids=tensor(tokenized.input_ids, device=device),
       attention_mask=tensor(tokenized.attention_mask, device=device),
@@ -112,9 +140,17 @@ emb_vit_l, emb_vit_big_g = embeddings
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
 unet_k_wrapped = VDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
+time_ids: FloatTensor = get_time_ids(
+  original_size=original_size,
+  crop_coords_top_left=crop_coords_top_left,
+  target_size=target_size,
+  dtype=emb_vit_l.dtype,
+  device=device,
+)
+
 added_cond_kwargs = CondKwargs(
-  text_embeds=None, # TODO
-  time_ids=None, # TODO
+  text_embeds=emb_vit_big_g,
+  time_ids=time_ids,
 )
 
 denoiser = CFGDenoiser(
@@ -141,38 +177,45 @@ sigmas: FloatTensor = get_sigmas_karras(
   device=device,
 ).to(sampling_dtype)
 
+# note: if you ever change this script into img2img, then you will want to start the
+# denoising from a later sigma than sigma_max.
+start_sigma = sigma_max
+
 latents_shape = LatentsShape(base_unet.in_channels, height_lt, width_lt)
 
 seed = 42
+# we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
 latents = randn((1, latents_shape.channels, latents_shape.height, latents_shape.width), dtype=sampling_dtype, device='cpu', generator=generator).to(device)
-latents *= sigmas[0]
+latents *= start_sigma
 
 noise_sampler = BrownianTreeNoiseSampler(
   latents,
-  # rather than using the sigma_{min,max} vars we already have:
-  # refer to sigmas array, which can be truncated (e.g. if we were doing img2img)
-  # we grab *penultimate* sigma_min, because final sigma is always 0
-  sigma_min=sigmas[-2],
-  sigma_max=sigmas[0],
+  sigma_min=sigma_min,
+  sigma_max=start_sigma,
   # there's no requirement that the noise sampler's seed be coupled to the init noise seed;
   # I'm just re-using it because it's a convenient arbitrary number
   seed=seed,
 )
 
-denoised_latents: FloatTensor = sample_dpmpp_2m(
-  denoiser,
-  latents,
-  sigmas,
-  # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers
-  # callback=callback,
-).to(vae.dtype)
+with inference_mode(), to_device(base_unet, device), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
+  denoised_latents: FloatTensor = sample_dpmpp_2m(
+    denoiser,
+    latents,
+    sigmas,
+    # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
+    # callback=callback,
+  ).to(vae.dtype)
 
 denoised_latents = denoised_latents / vae.config.scaling_factor
 
-with inference_mode():#, sdp_kernel(enable_math=False):
+base_unet.cpu()
+
+vae.to(device)
+# cannot use flash attn because VAE decoder's self-attn has head_dim 512
+with inference_mode():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
   decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
-  sample: FloatTensor = decoder_out.sample
-  for ix, decoded in enumerate(sample):
-    save_image(decoded, f'out/refined_{ix}.png') 
+sample: FloatTensor = decoder_out.sample
+for ix, decoded in enumerate(sample):
+  save_image(decoded, f'out/base_{ix}.png') 

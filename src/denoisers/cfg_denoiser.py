@@ -1,19 +1,15 @@
 from torch import FloatTensor, BoolTensor
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Union, Dict, Any
+from typing import Optional, Dict, Any
 
 from .denoiser_proto import Denoiser
-
-class CondKwargs(TypedDict):
-  text_embeds: FloatTensor
-  time_ids: FloatTensor
 
 @dataclass
 class CFGDenoiser:
   denoiser: Denoiser
   cross_attention_conds: FloatTensor
   cfg_scale: float = 5.
-  added_cond_kwargs: Union[CondKwargs, Dict[str, Any]] = {}
+  added_cond_kwargs: Dict[str, Any] = {}
   cross_attention_mask: Optional[BoolTensor] = None
 
   def __call__(
