@@ -19,6 +19,7 @@ from PIL import Image
 
 from src.denoisers.eps_denoiser import EPSDenoiser
 from src.denoisers.cfg_denoiser import CFGDenoiser
+from src.denoisers.nocfg_denoiser import NoCFGDenoiser
 from src.device import DeviceType, get_device_type
 from src.schedules import KarrasScheduleParams, KarrasScheduleTemplate, get_template_schedule
 from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas
@@ -207,15 +208,24 @@ added_cond_kwargs = CondKwargs(
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
 unet_k_wrapped = EPSDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
-denoiser = CFGDenoiser(
-  denoiser=unet_k_wrapped,
-  cross_attention_conds=concat_embed,
-  added_cond_kwargs=added_cond_kwargs,
-  cfg_scale=cfg_scale,
-  guidance_rescale=cfg_rescale,
-  # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
-  # cross_attention_mask=embedding_mask,
-)
+if cfg_scale > 1:
+  denoiser = CFGDenoiser(
+    denoiser=unet_k_wrapped,
+    cross_attention_conds=concat_embed,
+    added_cond_kwargs=added_cond_kwargs,
+    cfg_scale=cfg_scale,
+    guidance_rescale=cfg_rescale,
+    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+    # cross_attention_mask=embedding_mask,
+  )
+else:
+  denoiser = NoCFGDenoiser(
+    denoiser=unet_k_wrapped,
+    cross_attention_conds=concat_embed,
+    added_cond_kwargs=added_cond_kwargs,
+    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+    # cross_attention_mask=embedding_mask,
+  )
 
 schedule_template = KarrasScheduleTemplate.Mastering
 schedule: KarrasScheduleParams = get_template_schedule(
