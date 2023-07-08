@@ -121,6 +121,10 @@ crop_coords_top_left = Dimensions(0, 0)
 
 batch_size = 1
 cfg_scale = 5.
+# https://arxiv.org/abs/2305.08891
+# Common Diffusion Noise Schedules and Sample Steps are Flawed
+# 3.4. Rescale Classifier-Free Guidance
+cfg_rescale = .7
 
 force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
@@ -208,6 +212,8 @@ denoiser = CFGDenoiser(
   denoiser=unet_k_wrapped,
   cross_attention_conds=concat_embed,
   added_cond_kwargs=added_cond_kwargs,
+  cfg_scale=cfg_scale,
+  guidance_rescale=cfg_rescale,
   # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
   # cross_attention_mask=embedding_mask,
 )
