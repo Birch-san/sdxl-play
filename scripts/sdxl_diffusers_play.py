@@ -56,14 +56,16 @@ prompt = "90s anime sketch, girl wearing serafuku walking home, masterpiece, dra
 # prompt = "my anime waifu is so cute"
 
 seed=42
-torch.manual_seed(seed)
-
-generator = Generator(device='cpu')
-
-latents = randn((1, 4, height_lt, width_lt), dtype=pipe.unet.dtype, device='cpu', generator=generator).to(device)
+generator = Generator(device='cpu').manual_seed(seed)
 
 with torch.inference_mode(), sdp_kernel(enable_math=False):
-  base_images: FloatTensor = pipe(prompt=prompt, output_type="latent", width=base_width_px, height=base_height_px).images
+  base_images: FloatTensor = pipe(
+    prompt=prompt,
+    output_type="latent",
+    width=base_width_px,
+    height=base_height_px,
+    generator=generator,
+  ).images
 base_images_unscaled: FloatTensor = base_images / vae.config.scaling_factor
 
 with torch.inference_mode():
