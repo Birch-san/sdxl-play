@@ -56,7 +56,7 @@ def get_template_schedule(
       )
     case KarrasScheduleTemplate.CudaMastering:
       return KarrasScheduleParams(
-        steps=22,
+        steps=25,
         sigma_max=model_sigma_max,
         sigma_min=model_sigma_min,
         rho=7.
