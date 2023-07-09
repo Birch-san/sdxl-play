@@ -5,7 +5,7 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor
+from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable
@@ -17,6 +17,8 @@ import fnmatch
 from pathlib import Path
 from PIL import Image
 
+from src.iteration.batched import batched
+from src.denoisers.denoiser_factory import DenoiserFactory
 from src.denoisers.eps_denoiser import EPSDenoiser
 from src.denoisers.cfg_denoiser import CFGDenoiser
 from src.denoisers.nocfg_denoiser import NoCFGDenoiser
@@ -39,6 +41,11 @@ device = torch.device(device_type)
 # https://birchlabs.co.uk/machine-learning#denoise-in-fp16-sample-in-fp32
 sampling_dtype = torch.float32
 # sampling_dtype = torch.float16
+
+# if you have low VRAM, then we can swap Unets and VAE into VRAM and back as needed.
+# if you have high VRAM: don't bother with this because swapping costs time.
+# if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
+swap_models = False
 
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   f'stabilityai/stable-diffusion-xl-{expert}-0.9',
@@ -120,7 +127,6 @@ original_size = Dimensions(height_px, width_px)
 target_size = Dimensions(height_px, width_px)
 crop_coords_top_left = Dimensions(0, 0)
 
-batch_size = 1
 cfg_scale = 5.
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
@@ -132,8 +138,8 @@ uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
 negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
-# prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic'
+prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
+# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic'
 prompts: List[str] = [
   *([] if negative_prompt is None else [negative_prompt]),
   prompt,
@@ -165,11 +171,12 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
   attention_mask=tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
   embedding_masks.append(attention_mask)
 
-  with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
+  with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
     assert isinstance(text_encoder, CLIPTextModel) or isinstance(text_encoder, CLIPTextModelWithProjection), f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection'
     encoder_out: Union[BaseModelOutputWithPooling, CLIPTextModelOutput] = text_encoder(
       input_ids=input_ids,
-      # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+      # TODO: check what mask is like. I dunno whether these CLIPs were trained with masked input, and dunno whether Stability
+      #       inferenced from these CLIPs with a mask, but my guess for the latter is not.
       # attention_mask=attention_mask,
       output_hidden_states=True,
       return_dict=True,
@@ -197,32 +204,37 @@ time_ids: FloatTensor = get_time_ids(
   device=device,
 )
 
-added_cond_kwargs = CondKwargs(
-  text_embeds=pooled_embed,
-  time_ids=time_ids.expand(concat_embed.size(0), -1),
-)
-
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
 unet_k_wrapped = EPSDenoiser(base_unet, alphas_cumprod, sampling_dtype)
 
 if cfg_scale > 1:
-  denoiser = CFGDenoiser(
-    denoiser=unet_k_wrapped,
-    cross_attention_conds=concat_embed,
-    added_cond_kwargs=added_cond_kwargs,
-    cfg_scale=cfg_scale,
-    guidance_rescale=cfg_rescale,
-    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
-    # cross_attention_mask=embedding_mask,
-  )
+  def make_cfg_denoiser(
+    cross_attention_conds: FloatTensor,
+    added_cond_kwargs: CondKwargs,
+    cross_attention_mask: Optional[BoolTensor] = None,
+  ) -> CFGDenoiser:
+    return CFGDenoiser(
+      denoiser=unet_k_wrapped,
+      cross_attention_conds=cross_attention_conds,
+      added_cond_kwargs=added_cond_kwargs,
+      cfg_scale=cfg_scale,
+      guidance_rescale=cfg_rescale,
+      cross_attention_mask=cross_attention_mask,
+    )
+  denoiser_factory: DenoiserFactory[CFGDenoiser] = make_cfg_denoiser
 else:
-  denoiser = NoCFGDenoiser(
-    denoiser=unet_k_wrapped,
-    cross_attention_conds=concat_embed,
-    added_cond_kwargs=added_cond_kwargs,
-    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
-    # cross_attention_mask=embedding_mask,
-  )
+  def make_no_cfg_denoiser(
+    cross_attention_conds: FloatTensor,
+    added_cond_kwargs: CondKwargs,
+    cross_attention_mask: Optional[BoolTensor] = None,
+  ) -> CFGDenoiser:
+    return NoCFGDenoiser(
+      denoiser=unet_k_wrapped,
+      cross_attention_conds=cross_attention_conds,
+      added_cond_kwargs=added_cond_kwargs,
+      cross_attention_mask=cross_attention_mask,
+    )
+  denoiser_factory: DenoiserFactory[NoCFGDenoiser] = make_no_cfg_denoiser
 
 schedule_template = KarrasScheduleTemplate.CudaMastering
 schedule: KarrasScheduleParams = get_template_schedule(
@@ -256,42 +268,6 @@ sigmas = sigmas_quantized
 # denoising from a later sigma than sigma_max.
 start_sigma = sigmas[0]
 
-latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
-
-seed = 42
-# we generate with CPU random so that results can be reproduced across platforms
-generator = Generator(device='cpu').manual_seed(seed)
-
-latents = randn((1, latents_shape.channels, latents_shape.height, latents_shape.width), dtype=sampling_dtype, device='cpu', generator=generator).to(device)
-latents *= start_sigma
-
-# noise_sampler = BrownianTreeNoiseSampler(
-#   latents,
-#   sigma_min=sigma_min,
-#   sigma_max=start_sigma,
-#   # there's no requirement that the noise sampler's seed be coupled to the init noise seed;
-#   # I'm just re-using it because it's a convenient arbitrary number
-#   seed=seed,
-# )
-
-with inference_mode(), to_device(base_unet, device), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
-  denoised_latents: FloatTensor = sample_dpmpp_2m(
-    denoiser,
-    latents,
-    sigmas,
-    # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
-    # callback=callback,
-  ).to(vae.dtype)
-
-denoised_latents = denoised_latents / vae.config.scaling_factor
-
-# we avoid using our to_device() context manager, because we have no further large tasks;
-# don't want to pay to transfer VAE back to CPU upon context exit
-vae.to(device)
-# cannot use flash attn because VAE decoder's self-attn has head_dim 512
-with inference_mode():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext:
-  decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
-
 out_dir = 'out'
 makedirs(out_dir, exist_ok=True)
 
@@ -300,12 +276,86 @@ get_out_ix: Callable[[str], int] = lambda stem: int(stem.split('_', maxsplit=1)[
 out_keyer: Callable[[str], int] = lambda fname: get_out_ix(Path(fname).stem)
 out_imgs: List[str] = sorted(out_imgs_unsorted, key=out_keyer)
 next_ix = get_out_ix(Path(out_imgs[-1]).stem)+1 if out_imgs else 0
-out_stem: str = f'{next_ix:05d}_base_{prompt.split(",")[0]}_{seed}'
 
-sample: FloatTensor = decoder_out.sample.div(2).add(.5).clamp(0,1)
-for ix, decoded in enumerate(sample):
-  # if you want lossless images: consider png
-  out_name: str = join(out_dir, f'{out_stem}.jpg')
-  img: Image = rgb_to_pil(decoded)
-  img.save(out_name, subsampling=0, quality=95)
-  print(f'Saved image: {out_name}')
+latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
+
+# we generate with CPU random so that results can be reproduced across platforms
+generator = Generator(device='cpu')
+
+max_batch_size = 2
+
+start_seed = 42
+sample_count = 3
+seeds = range(start_seed, start_seed+sample_count)
+
+if not swap_models:
+  base_unet.to(device)
+  vae.to(device)
+
+for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
+  batch_size: int = len(batch_seeds)
+  latents: FloatTensor = stack([
+    randn(
+      (
+        latents_shape.channels,
+        latents_shape.height,
+        latents_shape.width
+      ),
+      dtype=sampling_dtype,
+      device=generator.device,
+      generator=generator.manual_seed(seed),
+    ) for seed in batch_seeds
+  ]).to(device)
+  latents *= start_sigma
+
+  out_stems: str = [
+    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_base_{prompt.split(",")[0]}_{seed}'
+    for sample_ix, seed in enumerate(batch_seeds)
+  ]
+
+  added_cond_kwargs = CondKwargs(
+    text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
+    time_ids=time_ids.expand(concat_embed.size(0) * batch_size, -1),
+  )
+
+  denoiser: Union[CFGDenoiser, NoCFGDenoiser] = denoiser_factory(
+    cross_attention_conds=concat_embed.repeat_interleave(batch_size, 0),
+    added_cond_kwargs=added_cond_kwargs,
+    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+    # cross_attention_mask=embedding_mask.repeat(batch_size, 1),
+  )
+
+  # I've commented-out the noise sampler, because it's only usable with ancestral samplers.
+  # for stable convergence: re-enable this if you decide to use sample_dpmpp_2m_sde.
+  # for reproducibility: you'll want to use a batch-of-1, to have a seed-per-sample rather than per-batch.
+  # noise_sampler = BrownianTreeNoiseSampler(
+  #   latents,
+  #   sigma_min=sigma_min,
+  #   sigma_max=start_sigma,
+  #   # there's no requirement that the noise sampler's seed be coupled to the init noise seed;
+  #   # I'm just re-using it because it's a convenient arbitrary number
+  #   seed=seeds[0],
+  # )
+
+  with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
+    denoised_latents: FloatTensor = sample_dpmpp_2m(
+      denoiser,
+      latents,
+      sigmas,
+      # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
+      # callback=callback,
+    ).to(vae.dtype)
+
+  denoised_latents = denoised_latents / vae.config.scaling_factor
+
+  # cannot use flash attn because VAE decoder's self-attn has head_dim 512
+  with inference_mode(), to_device(vae, device) if swap_models else nullcontext():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
+    decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
+
+  sample: FloatTensor = decoder_out.sample.div(2).add(.5).clamp(0,1)
+  for ix, (decoded, out_stem) in enumerate(zip(sample, out_stems)):
+    # if you want lossless images: consider png
+    out_name: str = join(out_dir, f'{out_stem}.jpg')
+    img: Image = rgb_to_pil(decoded)
+    img.save(out_name, subsampling=0, quality=95)
+    print(f'Saved image: {out_name}')
