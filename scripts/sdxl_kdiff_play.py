@@ -124,7 +124,7 @@ cfg_scale = 5.
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
 # 3.4. Rescale Classifier-Free Guidance
-cfg_rescale = .7
+cfg_rescale = 0.
 
 force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
