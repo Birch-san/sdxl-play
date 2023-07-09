@@ -16,9 +16,12 @@ from os.path import join
 import fnmatch
 from pathlib import Path
 from PIL import Image
+from functools import partial
 
 from src.iteration.batched import batched
-from src.denoisers.denoiser_factory import DenoiserFactory
+from src.denoisers.denoiser_proto import Denoiser
+from src.denoisers.denoiser_factory import DenoiserFactory, DenoiserFactoryFactory
+from src.denoisers.dispatch_denoiser import DispatchDenoiser, IdentifiedDenoiser
 from src.denoisers.eps_denoiser import EPSDenoiser
 from src.denoisers.cfg_denoiser import CFGDenoiser
 from src.denoisers.nocfg_denoiser import NoCFGDenoiser
@@ -47,15 +50,21 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
+use_refiner = True
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   f'stabilityai/stable-diffusion-xl-{expert}-0.9',
   torch_dtype=torch.float16,
   use_safetensors=True,
   variant='fp16',
   subfolder='unet',
-).eval() for expert in ['base',]]
-base_unet, *_ = unets
-# base_unet = torch.compile(base_unet, mode="reduce-overhead", fullgraph=True)
+).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
+base_unet: UNet2DConditionModel = unets[0]
+refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
+
+compile = False
+if compile:
+  for unet in unets:
+    torch.compile(unet, mode='reduce-overhead', fullgraph=True)
 
 tokenizers: List[CLIPTokenizer] = [CLIPTokenizer.from_pretrained(
   'stabilityai/stable-diffusion-xl-base-0.9',
@@ -188,61 +197,81 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
   embeddings.append(embedding)
 
 assert pooled_embed is not None
-concat_embed: FloatTensor = cat(embeddings, dim=-1)
-embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
+base_embed: FloatTensor = cat(embeddings, dim=-1)
+base_embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
+if use_refiner:
+  refiner_embed: FloatTensor = embeddings[1] # emb_vit_big_g
+  refiner_embedding_mask: BoolTensor = embedding_masks[1] # mask_vit_big_g
 
 if negative_prompt is None and cfg_scale > 1.:
-  concat_embed = pad(concat_embed, pad=(0,0, 0,0, 1,0), mode='constant')
+  base_embed = pad(base_embed, pad=(0,0, 0,0, 1,0), mode='constant')
   pooled_embed = pad(pooled_embed, pad=(0,0, 1,0), mode='constant')
-  embedding_mask = pad(pooled_embed, pad=(0,0, 1,0), mode='constant', value=True)
+  base_embedding_mask = pad(base_embedding_mask, pad=(0,0, 1,0), mode='constant', value=True)
+
+  if use_refiner:
+    refiner_embed = pad(refiner_embed, pad=(0,0, 0,0, 1,0), mode='constant')
 
 time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
   crop_coords_top_left=crop_coords_top_left,
   target_size=target_size,
-  dtype=concat_embed.dtype,
+  dtype=base_embed.dtype,
   device=device,
 )
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
-unet_k_wrapped = EPSDenoiser(base_unet, alphas_cumprod, sampling_dtype)
+
+unets_k_wrapped: List[EPSDenoiser] = [
+  EPSDenoiser(
+    unet,
+    alphas_cumprod,
+    sampling_dtype,
+  ) for unet in [base_unet, *([refiner_unet] * use_refiner)]
+]
+base_unet_k_wrapped: EPSDenoiser = unets_k_wrapped[0]
+refiner_unet_k_wrapped: Optional[EPSDenoiser] = unets_k_wrapped[1] if use_refiner else None
 
 if cfg_scale > 1:
   def make_cfg_denoiser(
+    delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> CFGDenoiser:
     return CFGDenoiser(
-      denoiser=unet_k_wrapped,
+      denoiser=delegate,
       cross_attention_conds=cross_attention_conds,
       added_cond_kwargs=added_cond_kwargs,
       cfg_scale=cfg_scale,
       guidance_rescale=cfg_rescale,
       cross_attention_mask=cross_attention_mask,
     )
-  denoiser_factory: DenoiserFactory[CFGDenoiser] = make_cfg_denoiser
+  denoiser_factory_factory: DenoiserFactoryFactory[CFGDenoiser] = lambda delegate: partial(make_cfg_denoiser, delegate)
 else:
   def make_no_cfg_denoiser(
+    delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> CFGDenoiser:
     return NoCFGDenoiser(
-      denoiser=unet_k_wrapped,
+      denoiser=delegate,
       cross_attention_conds=cross_attention_conds,
       added_cond_kwargs=added_cond_kwargs,
       cross_attention_mask=cross_attention_mask,
     )
-  denoiser_factory: DenoiserFactory[NoCFGDenoiser] = make_no_cfg_denoiser
+  denoiser_factory_factory: DenoiserFactoryFactory[NoCFGDenoiser] = lambda delegate: partial(make_cfg_denoiser, delegate)
+
+base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
+refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
 schedule_template = KarrasScheduleTemplate.CudaMastering
 schedule: KarrasScheduleParams = get_template_schedule(
   schedule_template,
-  model_sigma_min=unet_k_wrapped.sigma_min,
-  model_sigma_max=unet_k_wrapped.sigma_max,
-  device=unet_k_wrapped.sigmas.device,
-  dtype=unet_k_wrapped.sigmas.dtype,
+  model_sigma_min=base_unet_k_wrapped.sigma_min,
+  model_sigma_max=base_unet_k_wrapped.sigma_max,
+  device=base_unet_k_wrapped.sigmas.device,
+  dtype=base_unet_k_wrapped.sigmas.dtype,
 )
 
 steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
@@ -256,13 +285,18 @@ sigmas: FloatTensor = get_sigmas_karras(
 
 # here's how to use non-Karras sigmas
 # steps=25
-# sigmas = unet_k_wrapped.get_sigmas(steps)
+# sigmas = base_unet_k_wrapped.get_sigmas(steps)
 # sigma_max, sigma_min = sigmas[0], sigmas[-2]
 
 print(f"sigmas (unquantized):\n{', '.join(['%.4f' % s.item() for s in sigmas])}")
-sigmas_quantized = pad(quantize_to(sigmas[:-1], unet_k_wrapped.sigmas), pad=(0, 1))
+sigmas_quantized = pad(quantize_to(sigmas[:-1], base_unet_k_wrapped.sigmas), pad=(0, 1))
 print(f"sigmas (quantized):\n{', '.join(['%.4f' % s.item() for s in sigmas_quantized])}")
 sigmas = sigmas_quantized
+
+# refiner specializes in the final 200 timesteps of the denoising schedule
+# (SDXL technical report, 2.5)
+# I assume this corresponds to img2img strength of 0.2
+refine_from_sigma: float = base_unet_k_wrapped.sigmas[800].item()
 
 # note: if you ever change this script into img2img, then you will want to start the
 # denoising from a later sigma than sigma_max.
@@ -282,15 +316,17 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 2
+max_batch_size = 1
 
 start_seed = 42
-sample_count = 3
+sample_count = 1
 seeds = range(start_seed, start_seed+sample_count)
 
 if not swap_models:
   base_unet.to(device)
   vae.to(device)
+  if use_refiner:
+    refiner_unet.to(device)
 
 for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   batch_size: int = len(batch_seeds)
@@ -313,17 +349,48 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
     for sample_ix, seed in enumerate(batch_seeds)
   ]
 
-  added_cond_kwargs = CondKwargs(
-    text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-    time_ids=time_ids.expand(concat_embed.size(0) * batch_size, -1),
-  )
+  time_ids: FloatTensor = time_ids.expand(base_embed.size(0) * batch_size, -1)
 
-  denoiser: Union[CFGDenoiser, NoCFGDenoiser] = denoiser_factory(
-    cross_attention_conds=concat_embed.repeat_interleave(batch_size, 0),
-    added_cond_kwargs=added_cond_kwargs,
-    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
-    # cross_attention_mask=embedding_mask.repeat(batch_size, 1),
+  base_added_cond_kwargs = CondKwargs(
+    text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
+    time_ids=time_ids,
   )
+  base_denoiser: Denoiser = base_denoiser_factory(
+    cross_attention_conds=base_embed.repeat_interleave(batch_size, 0),
+    added_cond_kwargs=base_added_cond_kwargs,
+    # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+    # cross_attention_mask=base_embedding_mask.repeat(batch_size, 1),
+  )
+  if use_refiner:
+    refiner_added_cond_kwargs = CondKwargs(
+      text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
+      time_ids=time_ids,
+    )
+    refiner_denoiser: Denoiser = refiner_denoiser_factory(
+      cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
+      added_cond_kwargs=refiner_added_cond_kwargs,
+      # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
+      # cross_attention_mask=refiner_embedding_mask.repeat(batch_size, 1),
+    )
+
+    base_id = IdentifiedDenoiser('base', base_denoiser)
+    refiner_id = IdentifiedDenoiser('refiner', refiner_denoiser)
+    def pick_delegate(sigma: float) -> IdentifiedDenoiser:
+      return base_id if sigma > refine_from_sigma else refiner_id
+    def on_delegate_change(from_: Optional[str], to: str) -> None:
+      if from_ == 'base':
+        base_unet.cpu()
+      if to == 'base':
+        base_unet.to(device)
+      elif to == 'refiner':
+        refiner_unet.to(device)
+
+    denoiser = DispatchDenoiser(
+      pick_delegate=pick_delegate,
+      on_delegate_change=on_delegate_change if swap_models else None,
+    )
+  else:
+    denoiser: Denoiser = base_denoiser
 
   # I've commented-out the noise sampler, because it's only usable with ancestral samplers.
   # for stable convergence: re-enable this if you decide to use sample_dpmpp_2m_sde.
@@ -345,6 +412,9 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       # callback=callback,
     ).to(vae.dtype)
+
+  if swap_models:
+    refiner_unet.cpu()
 
   denoised_latents = denoised_latents / vae.config.scaling_factor
 

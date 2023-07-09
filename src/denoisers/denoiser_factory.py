@@ -11,7 +11,11 @@ D = TypeVar('D', bound=Denoiser)
 class DenoiserFactory(Generic[D], Protocol):
   def __call__(
     self,
+    delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> D: ...
+
+class DenoiserFactoryFactory(Generic[D], Protocol):
+  def __call__(self, denoiser: Denoiser) -> DenoiserFactory[D]: ...
