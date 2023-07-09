@@ -22,6 +22,8 @@ class KarrasScheduleTemplate(Enum):
   Science = auto()
   # high-quality, for not-potato PC
   CudaMastering = auto()
+  # increase rho slightly to include a sigmas 0.5692849159240723
+  CudaMasteringMaximizeRefiner = auto()
   # silly number of steps, for scientific demonstrations
   Overkill = auto()
 
@@ -61,6 +63,13 @@ def get_template_schedule(
         sigma_min=model_sigma_min,
         rho=7.
       )
+    case KarrasScheduleTemplate.CudaMasteringMaximizeRefiner:
+      return KarrasScheduleParams(
+        steps=25,
+        sigma_max=model_sigma_max,
+        sigma_min=model_sigma_min,
+        rho=7.4
+      )
     case KarrasScheduleTemplate.Science:
       # Diffusers EulerDiscreteScheduler#set_timesteps with timestep_spacing == 'leading'
       # does a weird thing where they don't start at timestep 999, but rather timestep (1000-(1000//steps))
@@ -82,4 +91,4 @@ def get_template_schedule(
         rho=7.
       )
     case _:
-      raise f"never heard of a {template} KarrasScheduleTemplate"
+      raise ValueError(f"never heard of a {template} KarrasScheduleTemplate")

@@ -143,14 +143,16 @@ cfg_scale = 5.
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
 # 3.4. Rescale Classifier-Free Guidance
 cfg_rescale = 0.
+# setting this to 0.7 seems to encourage text-like watermark artifacts to appear
+# cfg_rescale = 0.7
 
 force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
 negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
-prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic'
+# prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
+prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
 prompts: List[str] = [
   *([] if negative_prompt is None else [negative_prompt]),
   prompt,
@@ -276,7 +278,7 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-schedule_template = KarrasScheduleTemplate.CudaMastering
+schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
 schedule: KarrasScheduleParams = get_template_schedule(
   schedule_template,
   model_sigma_min=base_unet_k_wrapped.sigma_min,
@@ -304,10 +306,21 @@ sigmas_quantized = pad(quantize_to(sigmas[:-1], base_unet_k_wrapped.sigmas), pad
 print(f"sigmas (quantized):\n{', '.join(['%.4f' % s.item() for s in sigmas_quantized])}")
 sigmas = sigmas_quantized
 
-# refiner specializes in the final 200 timesteps of the denoising schedule
-# (SDXL technical report, 2.5)
-# I assume this corresponds to img2img strength of 0.2
-refine_from_sigma: float = base_unet_k_wrapped.sigmas[199].item()
+if use_refiner:
+  # (SDXL technical report, 2.5)
+  # refiner specializes in the final 200 timesteps of the denoising schedule,
+  # i.e. sigmas starting from:
+  #   0.5692849159240723
+  # I assume this corresponds to img2img strength of 0.2
+  refine_from_sigma: float = base_unet_k_wrapped.sigmas[199].item()
+  print(f"the highest sigma within the refiner's training was training distribution is: {refine_from_sigma:.4f} ")
+
+  base_purview: BoolTensor = sigmas>refine_from_sigma
+  refiner_purview: BoolTensor = sigmas<=refine_from_sigma
+  base_duty: int = base_purview.sum()
+  refiner_duty: int = refiner_purview[:-1].sum() # zero doesn't count
+  print(f"base model will be active during {base_duty} sigmas:\n{', '.join(['%.4f' % s.item() for s in sigmas[base_purview]])}")
+  print(f"refiner model will be active during {refiner_duty} sigmas:\n{', '.join(['%.4f' % s.item() for s in sigmas[refiner_purview][:-1]])}")
 
 # note: if you ever change this script into img2img, then you will want to start the
 # denoising from a later sigma than sigma_max.
@@ -327,10 +340,10 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 1
+max_batch_size = 2
 
 start_seed = 42
-sample_count = 1
+sample_count = 8
 seeds = range(start_seed, start_seed+sample_count)
 
 if not swap_models:
@@ -341,8 +354,11 @@ if not swap_models:
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
+print(f'Generating {sample_count} images, in batches of {max_batch_size}')
+
 for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   batch_size: int = len(batch_seeds)
+  print(f'Generating a batch of {batch_size} images, seeds {batch_seeds}')
   latents: FloatTensor = stack([
     randn(
       (
