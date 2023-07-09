@@ -339,6 +339,8 @@ if not swap_models:
   if use_refiner:
     refiner_unet.to(device)
 
+img_provenance: str = 'refined' if use_refiner else 'base'
+
 for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   batch_size: int = len(batch_seeds)
   latents: FloatTensor = stack([
@@ -356,7 +358,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   latents *= start_sigma
 
   out_stems: str = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_base_{prompt.split(",")[0]}_{seed}'
+    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
     for sample_ix, seed in enumerate(batch_seeds)
   ]
 
