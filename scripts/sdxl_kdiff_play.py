@@ -32,7 +32,7 @@ from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas, quant
 from src.latents_shape import LatentsShape
 from src.added_cond import CondKwargs
 from src.dimensions import Dimensions
-from src.time_ids import get_time_ids
+from src.time_ids import get_time_ids, get_time_ids_aesthetic
 from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
 
@@ -135,6 +135,8 @@ height_lt: int = height_px // vae_scale_factor
 original_size = Dimensions(height_px, width_px)
 target_size = Dimensions(height_px, width_px)
 crop_coords_top_left = Dimensions(0, 0)
+aesthetic_score = 6.
+negative_aesthetic_score = 2.5
 
 cfg_scale = 5.
 # https://arxiv.org/abs/2305.08891
@@ -211,13 +213,22 @@ if negative_prompt is None and cfg_scale > 1.:
   if use_refiner:
     refiner_embed = pad(refiner_embed, pad=(0,0, 0,0, 1,0), mode='constant')
 
-time_ids: FloatTensor = get_time_ids(
+base_time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
   crop_coords_top_left=crop_coords_top_left,
   target_size=target_size,
   dtype=base_embed.dtype,
   device=device,
 )
+refiner_time_ids: FloatTensor = cat([
+  get_time_ids_aesthetic(
+    original_size=original_size,
+    crop_coords_top_left=crop_coords_top_left,
+    aesthetic_score=score,
+    dtype=base_embed.dtype,
+    device='cpu',
+  ) for score in [negative_aesthetic_score, aesthetic_score]
+]).to(device)
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
 
@@ -349,11 +360,9 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
     for sample_ix, seed in enumerate(batch_seeds)
   ]
 
-  time_ids: FloatTensor = time_ids.expand(base_embed.size(0) * batch_size, -1)
-
   base_added_cond_kwargs = CondKwargs(
     text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-    time_ids=time_ids,
+    time_ids=base_time_ids.expand(base_embed.size(0) * batch_size, -1),
   )
   base_denoiser: Denoiser = base_denoiser_factory(
     cross_attention_conds=base_embed.repeat_interleave(batch_size, 0),
@@ -364,7 +373,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   if use_refiner:
     refiner_added_cond_kwargs = CondKwargs(
       text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-      time_ids=time_ids,
+      time_ids=refiner_time_ids.repeat(batch_size, 1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
       cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
