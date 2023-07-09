@@ -8,7 +8,7 @@ def get_betas(
   beta_start: float = 0.00085,
   beta_end: float = 0.012,
   device: Optional[DeviceType] = None,
-  dtype: torch.dtype = torch.float32,
+  dtype: torch.dtype = torch.float32 if torch.backends.mps.is_available() else torch.float64,
 ) -> Tensor:
   return linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=dtype, device=device) ** 2
 
