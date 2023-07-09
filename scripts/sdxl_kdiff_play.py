@@ -5,7 +5,7 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor
+from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor, zeros
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable
@@ -22,7 +22,7 @@ from src.denoisers.cfg_denoiser import CFGDenoiser
 from src.denoisers.nocfg_denoiser import NoCFGDenoiser
 from src.device import DeviceType, get_device_type
 from src.schedules import KarrasScheduleParams, KarrasScheduleTemplate, get_template_schedule
-from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas
+from src.schedule_params import get_alphas, get_alphas_cumprod, get_betas, quantize_to
 from src.latents_shape import LatentsShape
 from src.added_cond import CondKwargs
 from src.dimensions import Dimensions
@@ -37,6 +37,7 @@ device = torch.device(device_type)
 
 # https://birchlabs.co.uk/machine-learning#denoise-in-fp16-sample-in-fp32
 sampling_dtype = torch.float32
+# sampling_dtype = torch.float16
 
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   f'stabilityai/stable-diffusion-xl-{expert}-0.9',
@@ -227,7 +228,7 @@ else:
     # cross_attention_mask=embedding_mask,
   )
 
-schedule_template = KarrasScheduleTemplate.Mastering
+schedule_template = KarrasScheduleTemplate.Science
 schedule: KarrasScheduleParams = get_template_schedule(
   schedule_template,
   model_sigma_min=unet_k_wrapped.sigma_min,
@@ -245,9 +246,28 @@ sigmas: FloatTensor = get_sigmas_karras(
   device=device,
 ).to(sampling_dtype)
 
+# here's how to use non-Karras sigmas
+# steps=25
+# sigmas = unet_k_wrapped.get_sigmas(steps)
+# sigma_max, sigma_min = sigmas[0], sigmas[-2]
+
+print(f"sigmas (unquantized):\n{', '.join(['%.4f' % s.item() for s in sigmas])}")
+sigmas_quantized = torch.cat([
+  quantize_to(sigmas[:-1], unet_k_wrapped.sigmas),
+  zeros((1), device=sigmas.device, dtype=sigmas.dtype)
+])
+print(f"sigmas (quantized):\n{', '.join(['%.4f' % s.item() for s in sigmas_quantized])}")
+# TODO: discretize sigmas?
+# sigmas = sigmas_quantized
+
 # note: if you ever change this script into img2img, then you will want to start the
 # denoising from a later sigma than sigma_max.
-start_sigma = sigma_max
+start_sigma = sigmas[0]
+# start_sigma = sigma_max
+# due to float16 precision, the sigma_max we pass into our schedule, may get modified
+# start_sigma = schedule.sigma_max
+# diffusers EulerDiscreteScheduler#init_noise_sigma does this for some reason:
+# start_sigma = (sigma_max ** 2 + 1) ** 0.5
 
 latents_shape = LatentsShape(base_unet.in_channels, height_lt, width_lt)
 

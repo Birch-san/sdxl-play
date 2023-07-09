@@ -18,6 +18,8 @@ class KarrasScheduleTemplate(Enum):
   Searching = auto()
   # higher quality, but still not too expensive
   Mastering = auto()
+  # try to match Diffusers results
+  Science = auto()
   # high-quality, for not-potato PC
   CudaMastering = auto()
   # silly number of steps, for scientific demonstrations
@@ -57,6 +59,18 @@ def get_template_schedule(
         steps=22,
         sigma_max=model_sigma_max,
         sigma_min=model_sigma_min,
+        rho=7.
+      )
+    case KarrasScheduleTemplate.Science:
+      # Diffusers EulerDiscreteScheduler#set_timesteps with timestep_spacing == 'leading'
+      # does a weird thing where they don't start at timestep 999, but rather timestep (1000-(1000//steps))
+      #   timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1]
+      #   sigmas = np.interp(timesteps, np.arange(0, len(sigmas)), sigmas)
+      # but starting from that lower sigma_max does indeed seem to look pretty good
+      return KarrasScheduleParams(
+        steps=25,
+        sigma_max=tensor(13.120415687561035, device=device, dtype=dtype),
+        sigma_min=tensor(0.04131447896361351, device=device, dtype=dtype),
         rho=7.
       )
     case KarrasScheduleTemplate.Overkill:
