@@ -307,7 +307,7 @@ sigmas = sigmas_quantized
 # refiner specializes in the final 200 timesteps of the denoising schedule
 # (SDXL technical report, 2.5)
 # I assume this corresponds to img2img strength of 0.2
-refine_from_sigma: float = base_unet_k_wrapped.sigmas[800].item()
+refine_from_sigma: float = base_unet_k_wrapped.sigmas[199].item()
 
 # note: if you ever change this script into img2img, then you will want to start the
 # denoising from a later sigma than sigma_max.
