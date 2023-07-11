@@ -228,7 +228,7 @@ refiner_time_ids: FloatTensor = cat([
     aesthetic_score=score,
     dtype=base_embed.dtype,
     device='cpu',
-  ) for score in [negative_aesthetic_score, aesthetic_score]
+  ) for score in [*([negative_aesthetic_score] if cfg_scale > 1. else []), aesthetic_score]
 ]).to(device)
 
 alphas_cumprod: FloatTensor = get_alphas_cumprod(get_alphas(get_betas(device=device))).to(dtype=sampling_dtype)
@@ -272,7 +272,7 @@ else:
       added_cond_kwargs=added_cond_kwargs,
       cross_attention_mask=cross_attention_mask,
     )
-  denoiser_factory_factory: DenoiserFactoryFactory[NoCFGDenoiser] = lambda delegate: partial(make_cfg_denoiser, delegate)
+  denoiser_factory_factory: DenoiserFactoryFactory[NoCFGDenoiser] = lambda delegate: partial(make_no_cfg_denoiser, delegate)
 
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
@@ -390,7 +390,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   if use_refiner:
     refiner_added_cond_kwargs = CondKwargs(
       text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-      time_ids=refiner_time_ids.repeat(batch_size, 1),
+      time_ids=refiner_time_ids.repeat(batch_size, 1) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0) * batch_size, -1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
       cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
