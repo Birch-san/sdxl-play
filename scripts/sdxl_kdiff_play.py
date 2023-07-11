@@ -390,7 +390,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   if use_refiner:
     refiner_added_cond_kwargs = CondKwargs(
       text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-      time_ids=refiner_time_ids.repeat(batch_size, 1) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0) * batch_size, -1),
+      time_ids=refiner_time_ids.repeat_interleave(batch_size, 0) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0) * batch_size, -1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
       cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
