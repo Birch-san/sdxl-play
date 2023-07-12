@@ -1,8 +1,9 @@
-from typing import TypeVar, TypeAlias, Generic, Callable
+from typing import TypeVar, Generic, Protocol
 from dataclasses import dataclass
 
 T = TypeVar('T')
 U = TypeVar('U')
+M = TypeVar('M')
 
 @dataclass
 class InBetweenParams(Generic[T]):
@@ -10,4 +11,9 @@ class InBetweenParams(Generic[T]):
   to: T
   quotient: float
 
-MakeInbetween: TypeAlias = Callable[[InBetweenParams[T]], U]
+@dataclass
+class ManneredInBetweenParams(InBetweenParams[T], Generic[T, M]):
+  manner: M
+
+class MakeInbetween(Protocol, Generic[T, M, U]):
+  def __call__(self, params: ManneredInBetweenParams[T, M]) -> U: ...
