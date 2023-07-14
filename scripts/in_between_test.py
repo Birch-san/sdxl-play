@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from easing_functions import CubicEaseInOut
-from typing import List, Callable, TypeAlias, Set, Dict, Optional
+from typing import List, Callable, TypeAlias, Set, Dict, NamedTuple
+from torch import LongTensor, full, stack, tensor, cat
+import torch
 
 from src.interpolation.intersperse_linspace import intersperse_linspace, InterpSpec
 from src.interpolation.in_between import ManneredInBetweenParams
@@ -51,38 +53,64 @@ frames: List[str|InterPrompt] = intersperse_linspace(
 pass
 
 
+unique_num = 0
+def mock_embed(prompts: List[str]) -> LongTensor:
+  global unique_num
+  start_ix=unique_num
+  unique_num=unique_num+len(prompts)
+  return stack([
+    full((2,), fill_value=fill_value, dtype=torch.int64) for fill_value in range(
+      start_ix,
+      unique_num,
+    )
+  ])
 
 max_batch_size=2
 
-encodings: Dict[str, str] = {'old': 'OLD'}
+class EmbedSource(NamedTuple):
+  from_cache: bool
+  index: int
 
-def register_prompt_text(prompt_text: str) -> None:
+def get_embed_cache_prompt_to_ix(embed_cache_prompts: List[str]) -> Dict[str, int]:
+  return { prompt: ix for ix, prompt in enumerate(embed_cache_prompts)}
+
+# make some recognisable pretend embeddings
+embed_cache_prompts: List[str] = ['old', 'hello']
+embed_cache: LongTensor = mock_embed(embed_cache_prompts)
+embed_cache_prompt_to_ix: Dict[str, int] = get_embed_cache_prompt_to_ix(embed_cache_prompts)
+
+def register_prompt_text(prompt_text: str) -> EmbedSource:
+  if prompt_text in embed_cache_prompt_to_ix:
+    ix: int = embed_cache_prompt_to_ix[prompt_text]
+    return EmbedSource(from_cache=True, index=ix)
   if prompt_text not in prompt_text_to_ix:
     prompt_text_to_ix[prompt_text] = len(prompt_texts_ordered)
     prompt_texts_ordered.append(prompt_text)
   ix: int = prompt_text_to_ix[prompt_text]
-  return ix
-
-def encode(prompts: List[str]) -> List[str]:
-  return [prompt.upper() for prompt in prompts]
+  return EmbedSource(from_cache=False, index=ix)
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
+  prompt_text_to_source: Dict[str, EmbedSource] = {}
   prompt_text_to_ix: Dict[str, int] = {}
   prompt_texts_ordered: List[str] = []
-  prompt_text_instance_ixs: List[List[int]] = []
+  prompt_text_instance_sources: List[List[EmbedSource]] = []
+
   for frame in batch_frames:
-    sample_prompt_text_instance_ixs: List[int] = []
+    sample_prompt_text_instance_sources: List[EmbedSource] = []
     sample_prompts: List[str] = [frame.from_, frame.to] if isinstance(frame, InterPrompt) else [frame]
     for prompt in sample_prompts:
-      prompt_ix: int = register_prompt_text(prompt)
-      sample_prompt_text_instance_ixs.append(prompt_ix)
-    prompt_text_instance_ixs.append(sample_prompt_text_instance_ixs)
+      prompt_source: EmbedSource = register_prompt_text(prompt)
+      sample_prompt_text_instance_sources.append(prompt_source)
+    prompt_text_instance_sources.append(sample_prompt_text_instance_sources)
   
-  existing_prompts: Set[str] = encodings.keys() & prompt_text_to_ix.keys()
-  new_prompts: Set[str] = prompt_text_to_ix.keys() - existing_prompts
-  new_encoded: List[str] = encode(new_prompts)
-  encodings = {
-    **{key: encodings[key] for key in encodings if key in existing_prompts},
-    **{key: value for key, value in zip(new_prompts, new_encoded)},
-  }
+  new_encoded: LongTensor = mock_embed(prompt_texts_ordered)
+
+  retained_embed_ixs: Set[int] = {source.index for instance in prompt_text_instance_sources for source in instance if source.from_cache}
+  retained_embeds: LongTensor = embed_cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+
+  embed_cache = cat([retained_embeds, new_encoded])
+
+  embed_cache_prompts = [prompt for ix, prompt in enumerate(embed_cache_prompts) if ix in retained_embed_ixs] + prompt_texts_ordered
+  embed_cache_prompt_to_ix: Dict[str, int] = get_embed_cache_prompt_to_ix(embed_cache_prompts)
+
   pass
