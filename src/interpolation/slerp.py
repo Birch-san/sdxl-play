@@ -54,8 +54,9 @@ def slerp(v0: FloatTensor, v1: FloatTensor, t: float|FloatTensor, DOT_THRESHOLD=
   if gotta_lerp.any():
     v0_l: FloatTensor = v0.masked_select(gotta_lerp.unsqueeze(-1)).unflatten(dim=-1, sizes=(-1, *[1]*(v0.dim()-2), v0.size(-1)))
     v1_l: FloatTensor = v1.masked_select(gotta_lerp.unsqueeze(-1)).unflatten(dim=-1, sizes=(-1, *[1]*(v1.dim()-2), v1.size(-1)))
+    t_l: FloatTensor = t.masked_select(gotta_lerp.unsqueeze(-1)).unsqueeze(-1) if isinstance(t, Tensor) else t
 
-    lerped: FloatTensor = lerp(v0_l, v1_l, t)
+    lerped: FloatTensor = lerp(v0_l, v1_l, t_l)
 
     out: FloatTensor = out.masked_scatter_(gotta_lerp.unsqueeze(-1).expand(*t_batch_dims, *gotta_lerp.shape, 1), lerped)
 
@@ -64,12 +65,13 @@ def slerp(v0: FloatTensor, v1: FloatTensor, t: float|FloatTensor, DOT_THRESHOLD=
     v0_s: FloatTensor = v0.masked_select(can_slerp.unsqueeze(-1)).unflatten(dim=-1, sizes=(-1, *[1]*(v0.dim()-2), v0.size(-1)))
     v1_s: FloatTensor = v1.masked_select(can_slerp.unsqueeze(-1)).unflatten(dim=-1, sizes=(-1, *[1]*(v1.dim()-2), v1.size(-1)))
     dot_s: FloatTensor = dot.masked_select(can_slerp).unflatten(dim=-1, sizes=(-1, *[1]*(v1.dim()-1)))
+    t_s: FloatTensor = t.masked_select(can_slerp.unsqueeze(-1)).unsqueeze(-1) if isinstance(t, Tensor) else t
 
     # Calculate initial angle between v0 and v1
     theta_0: FloatTensor = dot_s.arccos()
     sin_theta_0: FloatTensor = theta_0.sin()
     # Angle at timestep t
-    theta_t: FloatTensor = theta_0 * t
+    theta_t: FloatTensor = theta_0 * t_s
     sin_theta_t: FloatTensor = theta_t.sin()
     # Finish the slerp algorithm
     s0: FloatTensor = (theta_0 - theta_t).sin() / sin_theta_0
