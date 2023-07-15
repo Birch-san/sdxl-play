@@ -92,18 +92,15 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-# TODO: evaluate madebyollin/sdxl-vae-fp16-fix
-# https://huggingface.co/madebyollin/sdxl-vae-fp16-fix
-# this seems like a great option for devices which lack bfloat16.
-# in fact: the precision of float16 may also be a better choice anyway.
-# only concern is it's a finetune, so results will be different… but Ollin's results look identical to me.
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  'stabilityai/stable-diffusion-xl-base-0.9',
+  # 'stabilityai/stable-diffusion-xl-base-0.9',
+  'madebyollin/sdxl-vae-fp16-fix',
   # decoder gets NaN result in float16.
-  torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  torch_dtype=torch.float16,
   use_safetensors=True,
-  variant='fp16',
-  subfolder='vae',
+  # variant='fp16',
+  # subfolder='vae',
 )
 # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
 # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
