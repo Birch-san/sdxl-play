@@ -187,6 +187,22 @@ def embed_batch(
   ]
   return stack([*unconds, *conds])
 
+def make_get_embed(
+  embedding_from_optional_text: EmbeddingFromOptionalText,
+  interp_pole: InterpPole,
+  cfg_pole: CFGPole,
+) -> GetEmbed:
+  get_prompt_txt: GetPromptText = partial(
+    get_prompt_text,
+    interp_pole=interp_pole,
+    cfg_pole=cfg_pole,
+  )
+  return partial(
+    get_embed,
+    embedding_from_optional_text=embedding_from_optional_text,
+    get_prompt_text=get_prompt_txt,
+  )
+
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   prompt_text_to_source: Dict[str, EmbedSource] = {}
   prompt_text_to_ix: Dict[str, int] = {}
@@ -216,22 +232,17 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
 
   embedding_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_embed if text is None else embed_cache[embed_cache_prompt_to_ix[text]]
 
-  make_get_embed: Callable[[InterpPole, CFGPole], GetEmbed] = lambda interp_pole, cfg_pole: partial(
-    get_embed,
+  make_make_get_embed: Callable[[InterpPole], GetEmbed] = lambda interp_pole: partial(
+    make_get_embed,
     embedding_from_optional_text=embedding_from_optional_text,
-    get_prompt_text=partial(
-      get_prompt_text,
-      interp_pole=interp_pole,
-      cfg_pole=cfg_pole,
-    )
+    interp_pole=interp_pole,
   )
-  make_make_get_embed: Callable[[InterpPole], GetEmbed] = lambda interp_pole: partial(make_get_embed, interp_pole=interp_pole)
 
   sources, targets = [embed_batch(
     batch_frames=batch_frames,
-    get_cond_embed=bound_make_get_embed(cfg_pole='cond'),
-    get_uncond_embed=bound_make_get_embed(cfg_pole='uncond') if cfg_scale > 1 else None,
-  ) for bound_make_get_embed in [
+    get_cond_embed=make_get_embed_(cfg_pole='cond'),
+    get_uncond_embed=make_get_embed_(cfg_pole='uncond') if cfg_scale > 1 else None,
+  ) for make_get_embed_ in [
       make_make_get_embed(interp_pole) for interp_pole in ['from', 'to']
     ]
   ]
