@@ -5,7 +5,7 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor, stack
+from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable
@@ -179,8 +179,8 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
     if num_truncated > 0:
       logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
 
-  input_ids=tensor(tokenized.input_ids, device=device)
-  attention_mask=tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
+  input_ids: LongTensor = tensor(tokenized.input_ids, device=device)
+  attention_mask: BoolTensor = tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
   embedding_masks.append(attention_mask)
 
   with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
