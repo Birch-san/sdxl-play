@@ -35,6 +35,7 @@ from src.dimensions import Dimensions
 from src.time_ids import get_time_ids, get_time_ids_aesthetic
 from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
+from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_last_hidden_state
 
 logger: Logger = getLogger(__file__)
 
@@ -200,6 +201,19 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
     if isinstance(encoder_out, CLIPTextModelOutput): # returned by CLIPTextModelWithProjection, e.g. vit_big_g
       assert pooled_embed is None, 'we only expected one of the text encoders (vit_big_g) to be a CLIPTextModelWithProjection capable of providing a pooled embedding.'
       pooled_embed: FloatTensor = encoder_out.text_embeds
+      # here's how we'll pool slerped hidden states. we'll slerp the hidden_states[-2], then pool 'em ourselves
+      # my_last_hidden_state: FloatTensor = forward_penultimate_hidden_state(
+      #   penultimate_hidden_state=encoder_out.hidden_states[-2],
+      #   final_encoder_layer=text_encoder.text_model.encoder.layers[-1],
+      #   input_ids=input_ids,
+      #   # attention_mask=attention_mask,
+      # )
+      # my_pooled: FloatTensor = pool_and_project_last_hidden_state(
+      #   last_hidden_state=my_last_hidden_state,
+      #   final_layer_norm=text_encoder.text_model.final_layer_norm,
+      #   input_ids=input_ids,
+      #   text_projection=text_encoder.text_projection,
+      # )
   embeddings.append(embedding)
 
 assert pooled_embed is not None
