@@ -1,6 +1,6 @@
 from easing_functions import CubicEaseInOut
-from typing import List, Callable, Set, Dict, NamedTuple, Optional
-from torch import LongTensor, FloatTensor, BoolTensor, stack, tensor, cat, lerp, zeros
+from typing import List, Callable, Set, Dict, Optional
+from torch import LongTensor, FloatTensor, BoolTensor, tensor, cat, lerp, zeros
 import torch
 from functools import partial
 
@@ -18,6 +18,7 @@ from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
 from src.embed_mgmt.get_prompt_text import InterpPole
 from src.embed_mgmt.embed_batch import embed_batch
 from src.embed_mgmt.mock_embed import mock_embed
+from src.embed_mgmt.embed_cache import EmbedCache
 
 force_zeros_for_empty_prompt = True
 cfg_scale = 5.
@@ -77,42 +78,15 @@ frames: List[SampleSpec] = intersperse_linspace(
   interp_specs=interp_specs,
 )
 
-# friendly place to put a breakpoint
-pass
-
 max_batch_size=3
-
-class EmbedSource(NamedTuple):
-  from_cache: bool
-  index: int
-
-def get_embed_cache_prompt_to_ix(embed_cache_prompts: List[str]) -> Dict[str, int]:
-  return { prompt: ix for ix, prompt in enumerate(embed_cache_prompts)}
 
 all_zeros_embed: Optional[FloatTensor] = zeros((2,), dtype=torch.float32) if force_zeros_for_empty_prompt else None
 
-# make some recognisable pretend embeddings
-# embed_cache_prompts: List[str] = ['old', 'hello']
-# embed_cache: LongTensor = mock_embed(embed_cache_prompts)
-# embed_cache_prompt_to_ix: Dict[str, int] = get_embed_cache_prompt_to_ix(embed_cache_prompts)
-embed_cache_prompts: List[str] = []
-embed_cache: Optional[LongTensor] = None
-embed_cache_prompt_to_ix: Dict[str, int] = {}
-
-def register_prompt_text(prompt_text: str) -> EmbedSource:
-  if prompt_text in embed_cache_prompt_to_ix:
-    ix: int = embed_cache_prompt_to_ix[prompt_text]
-    return EmbedSource(from_cache=True, index=ix)
-  if prompt_text not in prompt_text_to_ix:
-    prompt_text_to_ix[prompt_text] = len(prompt_texts_ordered)
-    prompt_texts_ordered.append(prompt_text)
-  ix: int = prompt_text_to_ix[prompt_text]
-  return EmbedSource(from_cache=False, index=ix)
+emb_cache = EmbedCache()
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
-  prompt_text_to_source: Dict[str, EmbedSource] = {}
-  prompt_text_to_ix: Dict[str, int] = {}
-  prompt_texts_ordered: List[str] = []
+  new_prompt_text_to_ix: Dict[str, int] = {}
+  new_prompt_texts: List[str] = []
   retained_embed_ixs: Set[int] = set()
 
   for frame in batch_frames:
@@ -121,26 +95,32 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       for prompt_text in [*[prompt.uncond_prompt] * isinstance(prompt, CFGPrompts), prompt.prompt]:
         if prompt_text is None:
           continue
-        prompt_source: EmbedSource = register_prompt_text(prompt_text)
-        from_cache, index = prompt_source
-        if from_cache:
-          retained_embed_ixs.add(index)
+        cache_ix: Optional[int] = emb_cache.get_cache_ix(prompt_text)
+        if cache_ix is None:
+          if prompt_text not in new_prompt_text_to_ix:
+            new_prompt_text_to_ix[prompt_text] = len(new_prompt_texts)
+            new_prompt_texts.append(prompt_text)
+        else:
+          retained_embed_ixs.add(cache_ix)
   
-  new_encoded: Optional[LongTensor] = mock_embed(prompt_texts_ordered) if prompt_texts_ordered else None
+  new_encoded: Optional[LongTensor] = mock_embed(new_prompt_texts) if new_prompt_texts else None
 
-  retained_embeds: Optional[LongTensor] = None if not retained_embed_ixs or embed_cache is None else embed_cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+  retained_embeds: Optional[LongTensor] = None if not retained_embed_ixs or emb_cache.cache is None else emb_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
 
   assert retained_embeds is not None or new_encoded is not None
-  embed_cache = cat([t for t in [retained_embeds, new_encoded] if t is not None])
+  next_cache: LongTensor = cat([t for t in [retained_embeds, new_encoded] if t is not None])
+  next_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(emb_cache.prompts) if ix in retained_embed_ixs] + new_prompt_texts
 
-  embed_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(embed_cache_prompts) if ix in retained_embed_ixs] + prompt_texts_ordered
-  embed_cache_prompt_to_ix: Dict[str, int] = get_embed_cache_prompt_to_ix(embed_cache_prompts)
+  emb_cache.update_cache(
+    cache=next_cache,
+    prompts=next_cache_prompts,
+  )
 
-  embedding_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_embed if text is None else embed_cache[embed_cache_prompt_to_ix[text]]
+  emb_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_embed if text is None else emb_cache.get_by_prompt(text)
 
   make_make_get_embed: Callable[[InterpPole], GetEmbed] = lambda interp_pole: partial(
     make_get_embed,
-    embedding_from_optional_text=embedding_from_optional_text,
+    embedding_from_optional_text=emb_from_optional_text,
     interp_pole=interp_pole,
   )
 
