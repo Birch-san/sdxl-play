@@ -8,7 +8,6 @@ from src.interpolation.intersperse_linspace import intersperse_linspace, InterpS
 from src.interpolation.in_between import ManneredInBetweenParams
 from src.interpolation.inter_prompt import InterPrompt
 from src.interpolation.interp_strategy import InterpStrategy
-from src.interpolation.slerp import slerp
 from src.interpolation.interp_manner import InterpManner, QuotientModifier
 from src.iteration.batched import batched
 from src.sample_spec.prompts import CFGPrompts, PromptType
