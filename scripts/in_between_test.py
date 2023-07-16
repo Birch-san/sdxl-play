@@ -1,7 +1,6 @@
-from dataclasses import dataclass
 from easing_functions import CubicEaseInOut
-from typing import Any, List, Callable, TypeAlias, Set, Dict, NamedTuple, Optional, Union, TypeAlias, Literal, Protocol
-from torch import LongTensor, FloatTensor, BoolTensor, full, stack, tensor, cat, lerp, zeros
+from typing import List, Callable, Set, Dict, NamedTuple, Optional
+from torch import LongTensor, FloatTensor, BoolTensor, stack, tensor, cat, lerp, zeros
 import torch
 from functools import partial
 
@@ -10,26 +9,15 @@ from src.interpolation.in_between import ManneredInBetweenParams
 from src.interpolation.inter_prompt import InterPrompt
 from src.interpolation.interp_strategy import InterpStrategy
 from src.interpolation.slerp import slerp
+from src.interpolation.interp_manner import InterpManner, QuotientModifier
 from src.iteration.batched import batched
-
-QuotientModifier: TypeAlias = Callable[[float], float]
-
-@dataclass
-class InterpManner:
-  quotient_modifier: QuotientModifier
-  strategy: InterpStrategy
-
-@dataclass
-class CFGPrompts:
-  # None indicates an all-zeros uncond (as opposed to an empty-string uncond). it doesn't disable CFG.
-  uncond_prompt: Optional[str]
-  prompt: str
-
-@dataclass
-class NoCFGPrompts:
-  prompt: str
-
-PromptType: TypeAlias = Union[CFGPrompts, NoCFGPrompts]
+from src.sample_spec.prompts import CFGPrompts, PromptType
+from src.sample_spec.sample_spec import SampleSpec
+from src.embed_mgmt.make_get_embed import make_get_embed
+from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
+from src.embed_mgmt.get_prompt_text import InterpPole
+from src.embed_mgmt.embed_batch import embed_batch
+from src.embed_mgmt.mock_embed import mock_embed
 
 force_zeros_for_empty_prompt = True
 cfg_scale = 5.
@@ -83,8 +71,6 @@ def make_inbetween(params: ManneredInBetweenParams[PromptType, InterpManner]) ->
     strategy=params.manner.strategy,
   )
 
-SampleSpec: TypeAlias = Union[PromptType, InterPrompt[PromptType]]
-
 frames: List[SampleSpec] = intersperse_linspace(
   keyframes=keyframes,
   make_inbetween=make_inbetween,
@@ -93,22 +79,6 @@ frames: List[SampleSpec] = intersperse_linspace(
 
 # friendly place to put a breakpoint
 pass
-
-
-unique_num = 1 # reserve all-zeros embed for uncond
-def mock_embed(prompts: List[str]) -> LongTensor:
-  global unique_num
-  start_ix=unique_num
-  unique_num=unique_num+len(prompts)
-  return stack([
-    # using float32 because this script runs on-CPU, and CPU doesn't implement a float16 lerp.
-    # in reality we'll run text encoders in float16, so we'll get float16 embeds.
-    # *however* we might want to cast-to-fp32 to do the slerp.
-    tensor((fill_value, 0, 1), dtype=torch.float32) for fill_value in range(
-      start_ix,
-      unique_num,
-    )
-  ])
 
 max_batch_size=3
 
@@ -138,70 +108,6 @@ def register_prompt_text(prompt_text: str) -> EmbedSource:
     prompt_texts_ordered.append(prompt_text)
   ix: int = prompt_text_to_ix[prompt_text]
   return EmbedSource(from_cache=False, index=ix)
-
-InterpPole: TypeAlias = Literal['from', 'to']
-CFGPole: TypeAlias = Literal['uncond', 'cond']
-
-GetPromptText: TypeAlias = Callable[[SampleSpec], Optional[str]]
-def get_prompt_text(
-  sample_spec: SampleSpec,
-  interp_pole: InterpPole,
-  cfg_pole: CFGPole,
-) -> Optional[str]:
-  if isinstance(sample_spec, InterPrompt):
-    prompt: PromptType = sample_spec.from_ if interp_pole == 'from' else sample_spec.to
-  else:
-    prompt: PromptType = sample_spec
-  if cfg_pole == 'cond':
-    return prompt.prompt
-  assert isinstance(prompt, CFGPrompts)
-  return prompt.uncond_prompt
-
-EmbeddingFromOptionalText: TypeAlias = Callable[[Optional[str]], FloatTensor]
-
-def get_embed(
-  embedding_from_optional_text: EmbeddingFromOptionalText,
-  get_prompt_text: Callable[[SampleSpec], Optional[str]],
-  sample_spec: SampleSpec,
-) -> str:
-  prompt_text: Optional[str] = get_prompt_text(sample_spec=sample_spec)
-  embed: FloatTensor = embedding_from_optional_text(prompt_text)
-  return embed
-
-class GetEmbed(Protocol):
-  def __call__(self, sample_spec: SampleSpec) -> FloatTensor: ...
-
-class MakeGetEmbed(Protocol):
-  def __call__(self, interp_pole: InterpPole) -> GetEmbed: ...
-
-def embed_batch(
-  batch_frames: List[Union[PromptType, InterPrompt[PromptType]]],
-  get_cond_embed: GetEmbed,
-  get_uncond_embed: Optional[GetEmbed],
-) -> FloatTensor:
-  unconds: List[FloatTensor] = [] if get_uncond_embed is None else [
-    get_uncond_embed(sample_spec=frame) for frame in batch_frames
-  ]
-  conds: List[FloatTensor] = [
-    get_cond_embed(sample_spec=frame) for frame in batch_frames
-  ]
-  return stack([*unconds, *conds])
-
-def make_get_embed(
-  embedding_from_optional_text: EmbeddingFromOptionalText,
-  interp_pole: InterpPole,
-  cfg_pole: CFGPole,
-) -> GetEmbed:
-  get_prompt_txt: GetPromptText = partial(
-    get_prompt_text,
-    interp_pole=interp_pole,
-    cfg_pole=cfg_pole,
-  )
-  return partial(
-    get_embed,
-    embedding_from_optional_text=embedding_from_optional_text,
-    get_prompt_text=get_prompt_txt,
-  )
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   prompt_text_to_source: Dict[str, EmbedSource] = {}
