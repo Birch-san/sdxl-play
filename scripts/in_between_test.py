@@ -19,6 +19,7 @@ from src.embed_mgmt.get_prompt_text import InterpPole
 from src.embed_mgmt.embed_batch import embed_batch
 from src.embed_mgmt.mock_embed import mock_embed
 from src.embed_mgmt.embed_cache import EmbedCache
+from src.latent_walk.interp_sources_to_targets import interp_sources_to_targets
 
 force_zeros_for_empty_prompt = True
 cfg_scale = 5.
@@ -133,23 +134,17 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     ]
   ]
 
-  quotients: FloatTensor = tensor(
-    [frame.quotient if isinstance(frame, InterPrompt) else 0 for frame in batch_frames],
-    dtype=sources.dtype,
-  ).unsqueeze(-1).repeat(2, 1)
-  wants_lerp: BoolTensor = tensor([
+  quotients: List[float] = [
+    frame.quotient if isinstance(frame, InterPrompt) else 0 for frame in batch_frames
+  ]
+  wants_lerp: List[bool] = [
     frame.strategy is InterpStrategy.Lerp if isinstance(frame, InterPrompt) else True for frame in batch_frames
-  ]).unsqueeze(-1).repeat(2, 1)
+  ]
 
-  slerped: FloatTensor = slerp(
-    sources,
-    targets,
-    quotients,
+  interped: FloatTensor = interp_sources_to_targets(
+    sources=sources,
+    targets=targets,
+    quotients=quotients,
+    wants_lerp=wants_lerp,
   )
-  lerped: FloatTensor = lerp(
-    sources,
-    targets,
-    quotients,
-  )
-  interped: FloatTensor = lerped.where(wants_lerp, slerped)
   pass
