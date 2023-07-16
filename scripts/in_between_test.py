@@ -1,6 +1,6 @@
 from easing_functions import CubicEaseInOut
-from typing import List, Callable, Set, Dict, Optional
-from torch import LongTensor, FloatTensor, BoolTensor, tensor, cat, lerp, zeros
+from typing import List, Callable, Set, Optional
+from torch import LongTensor, FloatTensor, tensor, cat, zeros
 import torch
 from functools import partial
 
@@ -86,8 +86,8 @@ all_zeros_embed: Optional[FloatTensor] = zeros((2,), dtype=torch.float32) if for
 emb_cache = EmbedCache()
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
-  new_prompt_text_to_ix: Dict[str, int] = {}
-  new_prompt_texts: List[str] = []
+  new_prompt_texts: Set[str] = set()
+  new_prompt_texts_ordered: List[str] = []
   retained_embed_ixs: Set[int] = set()
 
   for frame in batch_frames:
@@ -98,19 +98,19 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
           continue
         cache_ix: Optional[int] = emb_cache.get_cache_ix(prompt_text)
         if cache_ix is None:
-          if prompt_text not in new_prompt_text_to_ix:
-            new_prompt_text_to_ix[prompt_text] = len(new_prompt_texts)
-            new_prompt_texts.append(prompt_text)
+          if prompt_text not in new_prompt_texts:
+            new_prompt_texts.add(prompt_text)
+            new_prompt_texts_ordered.append(prompt_text)
         else:
           retained_embed_ixs.add(cache_ix)
   
-  new_encoded: Optional[LongTensor] = mock_embed(new_prompt_texts) if new_prompt_texts else None
+  new_encoded: Optional[LongTensor] = mock_embed(new_prompt_texts_ordered) if new_prompt_texts_ordered else None
 
   retained_embeds: Optional[LongTensor] = None if not retained_embed_ixs or emb_cache.cache is None else emb_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
 
   assert retained_embeds is not None or new_encoded is not None
   next_cache: LongTensor = cat([t for t in [retained_embeds, new_encoded] if t is not None])
-  next_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(emb_cache.prompts) if ix in retained_embed_ixs] + new_prompt_texts
+  next_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(emb_cache.prompts) if ix in retained_embed_ixs] + new_prompt_texts_ordered
 
   emb_cache.update_cache(
     cache=next_cache,
