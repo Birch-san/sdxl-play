@@ -79,7 +79,7 @@ use_refiner = False
 #   variant='fp16',
 #   subfolder='unet',
 # ).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
-unets: List[UNet2DConditionModel] = [UNet2DConditionModel]
+unets: List[UNet2DConditionModel] = [UNet2DConditionModel()]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
 
@@ -225,8 +225,15 @@ frames: List[SampleSpec] = intersperse_linspace(
   interp_specs=interp_specs,
 )
 
-all_zeros_embed_vit_l: Optional[FloatTensor] = zeros((1, 77, 768), dtype=base_unet.dtype, device=device) if force_zeros_for_empty_prompt else None
-all_zeros_embed_vit_big_g: Optional[FloatTensor] = zeros((1, 77, 1024), dtype=base_unet.dtype, device=device) if force_zeros_for_empty_prompt else None
+all_zeros_hidden_states: List[Optional[FloatTensor]] = [
+  zeros(
+    (text_encoder.config.max_position_embeddings, text_encoder.config.hidden_size),
+    dtype=base_unet.dtype,
+    device=device,
+  )
+for text_encoder in text_encoders] if force_zeros_for_empty_prompt else [None, None]
+
+# all_zeros_pooled_clip_vit_big_g
 
 base_time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
@@ -358,38 +365,6 @@ max_batch_size = 2
 
 seed = 14600
 
-keyframes: List[str] = [
-  'girl riding dragon, flying over water, masterpiece, dramatic, highly detailed, high dynamic range',
-  'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
-  'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
-]
-
-quotient_modifiers: List[QuotientModifier] = [lambda x:x, CubicEaseInOut()]
-
-interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
-  steps=5,
-  manner=InterpManner(
-    quotient_modifier=modifier,
-    strategy=InterpStrategy.Slerp,
-  ),
-) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
-
-def make_inbetween(params: ManneredInBetweenParams[str, InterpManner]) -> InterPrompt:
-  # apply easing function
-  modified_quotient: float = params.manner.quotient_modifier(params.quotient)
-  return InterPrompt(
-    from_=params.from_,
-    to=params.to,
-    quotient=modified_quotient,
-    strategy=params.manner.strategy,
-  )
-
-frames: List[str|InterPrompt] = intersperse_linspace(
-  keyframes=keyframes,
-  make_inbetween=make_inbetween,
-  interp_specs=interp_specs,
-)
-
 if not swap_models:
   base_unet.to(device)
   # TODO: uncomment VAE bits once we're done with text encoding and Unet
@@ -403,7 +378,8 @@ img_provenance: str = 'refined' if use_refiner else 'base'
 
 print(f'Generating {frames} images, in batches of {max_batch_size}')
 
-vit_l_emb_cache, vit_big_g_emb_cache = [EmbedCache() for _ in range(2)]
+embed_caches: List[EmbedCache] = [EmbedCache() for _ in range(2)]
+vit_l_emb_cache, vit_big_g_emb_cache = embed_caches
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   batch_size: int = len(batch_frames)
@@ -417,11 +393,11 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     dtype=sampling_dtype,
     device=generator.device,
     generator=generator.manual_seed(seed),
-  ).expand(batch_size, -1, -1, -1)
+  ).expand(batch_size, -1, -1, -1).to(device)
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.split(",")[0]}_{f"{frame.quotient:.02f}_" if isinstance(frame, InterPrompt) else ""}{seed}'
+    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.prompt.split(",")[0]}_{f"{frame.quotient:.02f}_" if isinstance(frame, InterPrompt) else ""}{seed}'
     for sample_ix, frame in enumerate(batch_frames)
   ]
 
@@ -444,6 +420,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
           retained_embed_ixs.add(cache_ix)
   
   if new_prompt_texts_ordered:
+    new_hidden_states: List[FloatTensor] = []
     for tokenizer_ix, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
       tokenizer_output: TokenizerOutput = tokenize(
         tokenizer=tokenizer,
@@ -455,9 +432,60 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
           text_encoder=text_encoder,
           tokenizer_output=tokenizer_output,
         )
+        new_hidden_states.append(embed_out.penultimate_hidden_states)
+    new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
   else:
-    new_encoded_vit_l = new_encoded_vit_big_g = None
-  # new_encodeds: Optional[List[LongTensor]] = embed(new_prompt_texts_ordered) if new_prompt_texts_ordered else None
+    new_hidden_states: List[Optional[FloatTensor]] = [None, None]
+  new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
+
+  if vit_l_emb_cache.cache:
+    retained_hidden_states: List[FloatTensor] = [
+      embed_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+      for embed_cache in embed_caches
+    ]
+  else:
+    retained_hidden_states: List[Optional[FloatTensor]] = [None, None]
+  retained_vit_l_embeds, retained_vit_big_g_embeds = retained_hidden_states
+  
+  for retained_hidden_states_, new_hidden_states_, emb_cache, all_zeros_hidden_states_ in zip(retained_hidden_states, new_hidden_states, embed_caches, all_zeros_hidden_states):
+    assert retained_hidden_states is not None or new_hidden_states is not None
+    next_cache: LongTensor = cat([t for t in [retained_hidden_states_, new_hidden_states_] if t is not None])
+    next_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(emb_cache.prompts) if ix in retained_embed_ixs] + new_prompt_texts_ordered
+    emb_cache.update_cache(
+      cache=next_cache,
+      prompts=next_cache_prompts,
+    )
+
+    emb_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_hidden_states_ if text is None else emb_cache.get_by_prompt(text)
+
+    make_make_get_embed: Callable[[InterpPole], GetEmbed] = lambda interp_pole: partial(
+      make_get_embed,
+      embedding_from_optional_text=emb_from_optional_text,
+      interp_pole=interp_pole,
+    )
+
+    sources, targets = [embed_batch(
+      batch_frames=batch_frames,
+      get_cond_embed=make_get_embed_(cfg_pole='cond'),
+      get_uncond_embed=make_get_embed_(cfg_pole='uncond') if cfg_scale > 1 else None,
+    ) for make_get_embed_ in [
+        make_make_get_embed(interp_pole) for interp_pole in ['from', 'to']
+      ]
+    ]
+
+    quotients: List[float] = [
+      frame.quotient if isinstance(frame, InterPrompt) else 0 for frame in batch_frames
+    ]
+    wants_lerp: List[bool] = [
+      frame.strategy is InterpStrategy.Lerp if isinstance(frame, InterPrompt) else True for frame in batch_frames
+    ]
+
+    interped: FloatTensor = interp_sources_to_targets(
+      sources=sources,
+      targets=targets,
+      quotients=quotients,
+      wants_lerp=wants_lerp,
+    )
 
   base_added_cond_kwargs = CondKwargs(
     text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
