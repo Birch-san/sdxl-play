@@ -1,14 +1,16 @@
 from contextlib import nullcontext
+from dataclasses import dataclass
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
+from easing_functions import CubicEaseInOut
 from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor
+from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, zeros
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
-from typing import List, Union, Optional, Callable
+from typing import List, Union, Optional, Callable, TypeAlias, Set
 from logging import getLogger, Logger
 from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
 from os import makedirs, listdir
@@ -35,6 +37,23 @@ from src.dimensions import Dimensions
 from src.time_ids import get_time_ids, get_time_ids_aesthetic
 from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
+from src.embed_mgmt.tokenize import tokenize, TokenizerOutput
+from src.embed_mgmt.embed import embed, EmbedderOutput
+from src.interpolation.intersperse_linspace import intersperse_linspace, InterpSpec
+from src.interpolation.in_between import ManneredInBetweenParams
+from src.interpolation.inter_prompt import InterPrompt
+from src.interpolation.interp_strategy import InterpStrategy
+from src.interpolation.interp_manner import InterpManner, QuotientModifier
+from src.iteration.batched import batched
+from src.sample_spec.prompts import CFGPrompts, NoCFGPrompts, PromptType
+from src.sample_spec.sample_spec import SampleSpec
+from src.embed_mgmt.make_get_embed import make_get_embed
+from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
+from src.embed_mgmt.get_prompt_text import InterpPole
+from src.embed_mgmt.embed_batch import embed_batch
+from src.embed_mgmt.mock_embed import mock_embed
+from src.embed_mgmt.embed_cache import EmbedCache
+from src.latent_walk.interp_sources_to_targets import interp_sources_to_targets
 from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_last_hidden_state
 
 logger: Logger = getLogger(__file__)
@@ -52,13 +71,15 @@ sampling_dtype = torch.float32
 swap_models = False
 
 use_refiner = False
-unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
-  f'stabilityai/stable-diffusion-xl-{expert}-0.9',
-  torch_dtype=torch.float16,
-  use_safetensors=True,
-  variant='fp16',
-  subfolder='unet',
-).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
+# TODO: uncomment Unet bits once we're done with text encoding
+# unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
+#   f'stabilityai/stable-diffusion-xl-{expert}-0.9',
+#   torch_dtype=torch.float16,
+#   use_safetensors=True,
+#   variant='fp16',
+#   subfolder='unet',
+# ).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
+unets: List[UNet2DConditionModel] = [UNet2DConditionModel]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
 
@@ -93,16 +114,17 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  # 'stabilityai/stable-diffusion-xl-base-0.9',
-  'madebyollin/sdxl-vae-fp16-fix',
-  # decoder gets NaN result in float16.
-  # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
-  torch_dtype=torch.float16,
-  use_safetensors=True,
-  # variant='fp16',
-  # subfolder='vae',
-)
+# TODO: uncomment VAE bits once we're done with text encoding and Unet
+# vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+#   # 'stabilityai/stable-diffusion-xl-base-0.9',
+#   'madebyollin/sdxl-vae-fp16-fix',
+#   # decoder gets NaN result in float16.
+#   # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+#   torch_dtype=torch.float16,
+#   use_safetensors=True,
+#   # variant='fp16',
+#   # subfolder='vae',
+# )
 # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
 # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
 # TODO: rather than slicing *everything* (submit smaller image):
@@ -111,9 +133,9 @@ vae: AutoencoderKL = AutoencoderKL.from_pretrained(
 #       i.e. vae.set_attn_processor(SlicedAttnProcessor())
 # vae.enable_slicing()
 # this script won't be using the encoder
-del vae.encoder
-vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
-# vae_scale_factor=8
+# del vae.encoder
+# vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
+vae_scale_factor=8
 
 def round_down(num: int, divisor: int) -> int:
   return num - (num % divisor)
@@ -149,93 +171,68 @@ cfg_rescale = 0.
 force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
-negative_prompt: Optional[str] = uncond_prompt
-# prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
-# prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-# prompt: str = '90s anime promo art, bishoujo, girl in sailor uniform walking home, masterpiece, dramatic, wind'
-# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination, realistic, highly detailed'
-# prompt: str = 'the dragon attacks at night, masterpiece, dramatic, highly detailed, high dynamic range'
-prompt: str = 'girl riding dragon, flying over water, masterpiece, dramatic, highly detailed, high dynamic range'
-prompts: List[str] = [
-  *([] if negative_prompt is None else [negative_prompt]),
-  prompt,
+# keyframes: List[PromptType] = [
+#   CFGPrompts(
+#     uncond_prompt=uncond_prompt,
+#     prompt='hello',
+#   ),
+#   CFGPrompts(
+#     uncond_prompt=uncond_prompt,
+#     prompt='fellow',
+#   ),
+#   CFGPrompts(
+#     uncond_prompt=uncond_prompt,
+#     prompt='geese',
+#   )
+# ]
+
+keyframes: List[PromptType] = [
+  CFGPrompts(
+    uncond_prompt=uncond_prompt,
+    prompt=prompt,
+  ) if cfg_scale > 1 else NoCFGPrompts(
+    prompt=prompt,
+  ) for prompt in [
+    'girl riding dragon, flying over water, masterpiece, dramatic, highly detailed, high dynamic range',
+    'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
+    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
+  ]
 ]
 
-tokenizeds: List[BatchEncoding] = [tokenizer(
-  prompts,
-  padding="max_length",
-  max_length=tokenizer.model_max_length,
-  truncation=True,
-  return_overflowing_tokens=True,
-) for tokenizer in tokenizers]
-enc_vit_l, enc_vit_big_g = tokenizeds
+quotient_modifiers: List[QuotientModifier] = [lambda x:x, CubicEaseInOut()]
 
-# we expect to get one embedding (of penultimate hidden states) per text encoder
-embeddings: List[FloatTensor] = []
-embedding_masks: List[BoolTensor] = []
-# we expect to get just one pooled embedding, from vit_big_g
-pooled_embed: Optional[FloatTensor] = None
-for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenizeds, tokenizers, text_encoders)):
-  overflows: List[List[int]] = tokenized.data['overflowing_tokens']
-  overflows_decoded: List[str] = tokenizer.batch_decode(overflows)
-  num_truncateds: List[int] = tokenized.data['num_truncated_tokens']
-  for prompt_ix, (overflow_decoded, num_truncated) in enumerate(zip(overflows_decoded, num_truncateds)):
-    if num_truncated > 0:
-      logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
+interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
+  steps=3,
+  manner=InterpManner(
+    quotient_modifier=modifier,
+    strategy=InterpStrategy.Slerp,
+  ),
+) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
 
-  input_ids: LongTensor = tensor(tokenized.input_ids, device=device)
-  attention_mask: BoolTensor = tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
-  embedding_masks.append(attention_mask)
+def make_inbetween(params: ManneredInBetweenParams[PromptType, InterpManner]) -> InterPrompt[PromptType]:
+  # apply easing function
+  modified_quotient: float = params.manner.quotient_modifier(params.quotient)
+  return InterPrompt[PromptType](
+    from_=params.from_,
+    to=params.to,
+    quotient=modified_quotient,
+    strategy=params.manner.strategy,
+  )
 
-  with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
-    assert isinstance(text_encoder, CLIPTextModel) or isinstance(text_encoder, CLIPTextModelWithProjection), f'text_encoder of type "{type(text_encoder)}" was unexpectedly neither a CLIPTextModel nor a CLIPTextModelWithProjection'
-    encoder_out: Union[BaseModelOutputWithPooling, CLIPTextModelOutput] = text_encoder(
-      input_ids=input_ids,
-      # TODO: check what mask is like. I dunno whether these CLIPs were trained with masked input, and dunno whether Stability
-      #       inferenced from these CLIPs with a mask, but my guess for the latter is not.
-      # attention_mask=attention_mask,
-      output_hidden_states=True,
-      return_dict=True,
-    )
-    embedding: FloatTensor = encoder_out.hidden_states[-2]
-    if isinstance(encoder_out, CLIPTextModelOutput): # returned by CLIPTextModelWithProjection, e.g. vit_big_g
-      assert pooled_embed is None, 'we only expected one of the text encoders (vit_big_g) to be a CLIPTextModelWithProjection capable of providing a pooled embedding.'
-      pooled_embed: FloatTensor = encoder_out.text_embeds
-      # here's how we'll pool slerped hidden states. we'll slerp the hidden_states[-2], then pool 'em ourselves
-      # my_last_hidden_state: FloatTensor = forward_penultimate_hidden_state(
-      #   penultimate_hidden_state=encoder_out.hidden_states[-2],
-      #   final_encoder_layer=text_encoder.text_model.encoder.layers[-1],
-      #   input_ids=input_ids,
-      #   # attention_mask=attention_mask,
-      # )
-      # my_pooled: FloatTensor = pool_and_project_last_hidden_state(
-      #   last_hidden_state=my_last_hidden_state,
-      #   final_layer_norm=text_encoder.text_model.final_layer_norm,
-      #   input_ids=input_ids,
-      #   text_projection=text_encoder.text_projection,
-      # )
-  embeddings.append(embedding)
+frames: List[SampleSpec] = intersperse_linspace(
+  keyframes=keyframes,
+  make_inbetween=make_inbetween,
+  interp_specs=interp_specs,
+)
 
-assert pooled_embed is not None
-base_embed: FloatTensor = cat(embeddings, dim=-1)
-base_embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
-if use_refiner:
-  refiner_embed: FloatTensor = embeddings[1] # emb_vit_big_g
-  refiner_embedding_mask: BoolTensor = embedding_masks[1] # mask_vit_big_g
-
-if negative_prompt is None and cfg_scale > 1.:
-  base_embed = pad(base_embed, pad=(0,0, 0,0, 1,0), mode='constant')
-  pooled_embed = pad(pooled_embed, pad=(0,0, 1,0), mode='constant')
-  base_embedding_mask = pad(base_embedding_mask, pad=(0,0, 1,0), mode='constant', value=True)
-
-  if use_refiner:
-    refiner_embed = pad(refiner_embed, pad=(0,0, 0,0, 1,0), mode='constant')
+all_zeros_embed_vit_l: Optional[FloatTensor] = zeros((1, 77, 768), dtype=base_unet.dtype, device=device) if force_zeros_for_empty_prompt else None
+all_zeros_embed_vit_big_g: Optional[FloatTensor] = zeros((1, 77, 1024), dtype=base_unet.dtype, device=device) if force_zeros_for_empty_prompt else None
 
 base_time_ids: FloatTensor = get_time_ids(
   original_size=original_size,
   crop_coords_top_left=crop_coords_top_left,
   target_size=target_size,
-  dtype=base_embed.dtype,
+  dtype=base_unet.dtype,
   device=device,
 )
 refiner_time_ids: FloatTensor = cat([
@@ -243,7 +240,7 @@ refiner_time_ids: FloatTensor = cat([
     original_size=original_size,
     crop_coords_top_left=crop_coords_top_left,
     aesthetic_score=score,
-    dtype=base_embed.dtype,
+    dtype=base_unet.dtype,
     device='cpu',
   ) for score in [*([negative_aesthetic_score] if cfg_scale > 1. else []), aesthetic_score]
 ]).to(device)
@@ -294,7 +291,8 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+# schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+schedule_template = KarrasScheduleTemplate.Prototyping
 schedule: KarrasScheduleParams = get_template_schedule(
   schedule_template,
   model_sigma_min=base_unet_k_wrapped.sigma_min,
@@ -358,41 +356,108 @@ generator = Generator(device='cpu')
 
 max_batch_size = 2
 
-start_seed = 72
-sample_count = 10
-seeds = range(start_seed, start_seed+sample_count)
+seed = 14600
+
+keyframes: List[str] = [
+  'girl riding dragon, flying over water, masterpiece, dramatic, highly detailed, high dynamic range',
+  'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
+  'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
+]
+
+quotient_modifiers: List[QuotientModifier] = [lambda x:x, CubicEaseInOut()]
+
+interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
+  steps=5,
+  manner=InterpManner(
+    quotient_modifier=modifier,
+    strategy=InterpStrategy.Slerp,
+  ),
+) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
+
+def make_inbetween(params: ManneredInBetweenParams[str, InterpManner]) -> InterPrompt:
+  # apply easing function
+  modified_quotient: float = params.manner.quotient_modifier(params.quotient)
+  return InterPrompt(
+    from_=params.from_,
+    to=params.to,
+    quotient=modified_quotient,
+    strategy=params.manner.strategy,
+  )
+
+frames: List[str|InterPrompt] = intersperse_linspace(
+  keyframes=keyframes,
+  make_inbetween=make_inbetween,
+  interp_specs=interp_specs,
+)
 
 if not swap_models:
   base_unet.to(device)
-  vae.to(device)
+  # TODO: uncomment VAE bits once we're done with text encoding and Unet
+  # vae.to(device)
   if use_refiner:
     refiner_unet.to(device)
+  for text_encoder in text_encoders:
+    text_encoder.to(device)
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
-print(f'Generating {sample_count} images, in batches of {max_batch_size}')
+print(f'Generating {frames} images, in batches of {max_batch_size}')
 
-for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
-  batch_size: int = len(batch_seeds)
-  print(f'Generating a batch of {batch_size} images, seeds {batch_seeds}')
-  latents: FloatTensor = stack([
-    randn(
-      (
-        latents_shape.channels,
-        latents_shape.height,
-        latents_shape.width
-      ),
-      dtype=sampling_dtype,
-      device=generator.device,
-      generator=generator.manual_seed(seed),
-    ) for seed in batch_seeds
-  ]).to(device)
+vit_l_emb_cache, vit_big_g_emb_cache = [EmbedCache() for _ in range(2)]
+
+for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
+  batch_size: int = len(batch_frames)
+  print(f'Generating a batch of {batch_size} images, seeds {batch_frames}')
+  latents: FloatTensor = randn(
+    (
+      latents_shape.channels,
+      latents_shape.height,
+      latents_shape.width
+    ),
+    dtype=sampling_dtype,
+    device=generator.device,
+    generator=generator.manual_seed(seed),
+  ).expand(batch_size, -1, -1, -1)
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
-    for sample_ix, seed in enumerate(batch_seeds)
+    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.split(",")[0]}_{f"{frame.quotient:.02f}_" if isinstance(frame, InterPrompt) else ""}{seed}'
+    for sample_ix, frame in enumerate(batch_frames)
   ]
+
+  new_prompt_texts: Set[str] = set()
+  new_prompt_texts_ordered: List[str] = []
+  retained_embed_ixs: Set[int] = set()
+
+  for frame in batch_frames:
+    sample_prompts: List[PromptType] = [frame.from_, frame.to] if isinstance(frame, InterPrompt) else [frame]
+    for prompt in sample_prompts:
+      for prompt_text in [*[prompt.uncond_prompt] * isinstance(prompt, CFGPrompts), prompt.prompt]:
+        if prompt_text is None:
+          continue
+        cache_ix: Optional[int] = vit_l_emb_cache.get_cache_ix(prompt_text)
+        if cache_ix is None:
+          if prompt_text not in new_prompt_texts:
+            new_prompt_texts.add(prompt_text)
+            new_prompt_texts_ordered.append(prompt_text)
+        else:
+          retained_embed_ixs.add(cache_ix)
+  
+  if new_prompt_texts_ordered:
+    for tokenizer_ix, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+      tokenizer_output: TokenizerOutput = tokenize(
+        tokenizer=tokenizer,
+        prompts=new_prompt_texts_ordered,
+        device=device,
+      )
+      with to_device(text_encoder, device) if swap_models else nullcontext(), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
+        embed_out: EmbedderOutput = embed(
+          text_encoder=text_encoder,
+          tokenizer_output=tokenizer_output,
+        )
+  else:
+    new_encoded_vit_l = new_encoded_vit_big_g = None
+  # new_encodeds: Optional[List[LongTensor]] = embed(new_prompt_texts_ordered) if new_prompt_texts_ordered else None
 
   base_added_cond_kwargs = CondKwargs(
     text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
