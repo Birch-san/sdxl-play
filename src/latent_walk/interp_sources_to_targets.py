@@ -8,8 +8,8 @@ def interp_sources_to_targets(
   quotients: List[float],
   wants_lerp: List[bool]
 ) -> FloatTensor:
-  quotients_t: FloatTensor = tensor(quotients, dtype=sources.dtype).unsqueeze(-1).repeat(2, 1)
-  wants_lerp_t: BoolTensor = tensor(wants_lerp).unsqueeze(-1).repeat(2, 1)
+  quotients_t: FloatTensor = tensor(quotients, dtype=sources.dtype, device=sources.device).repeat(2).reshape(-1, *(1,)*(sources.ndim-1))
+  wants_lerp_t: BoolTensor = tensor(wants_lerp).repeat(2).unsqueeze(-1)
 
   slerped: FloatTensor = slerp(
     sources,
