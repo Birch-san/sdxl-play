@@ -1,10 +1,12 @@
-from torch import LongTensor
-from typing import List, Dict, Optional
+from torch import Tensor, FloatTensor
+from typing import List, Dict, Optional, Generic, TypeVar
 from src.embed_mgmt.mock_embed import mock_embed
 
-class EmbedCache:
+TensorTy = TypeVar('TensorTy', bound=Tensor)
+
+class EmbedCache(Generic[TensorTy]):
   prompts: List[str] = []
-  cache: Optional[LongTensor] = None
+  cache: Optional[TensorTy] = None
   prompt_to_ix: Dict[str, int] = {}
 
   def fill_with_mocks(self) -> None:
@@ -19,12 +21,12 @@ class EmbedCache:
       return ix
     return None
 
-  def get_by_prompt(self, prompt_text: str) -> LongTensor:
+  def get_by_prompt(self, prompt_text: str) -> TensorTy:
     return self.cache[self.prompt_to_ix[prompt_text]]
 
   def update_cache(
     self,
-    cache: LongTensor,
+    cache: TensorTy,
     prompts: List[str],
   ) -> None:
     self.cache = cache

@@ -82,7 +82,7 @@ max_batch_size=3
 
 all_zeros_embed: Optional[FloatTensor] = zeros((2,), dtype=torch.float32) if force_zeros_for_empty_prompt else None
 
-emb_cache = EmbedCache()
+emb_cache = EmbedCache[FloatTensor]()
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   new_prompt_texts: Set[str] = set()

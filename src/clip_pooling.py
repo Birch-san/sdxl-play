@@ -1,20 +1,20 @@
 import torch
-from torch import BoolTensor, FloatTensor, LongTensor, inference_mode, arange
+from torch import BoolTensor, FloatTensor, LongTensor, arange
 from torch.nn import LayerNorm, Linear
 from transformers.models.clip.modeling_clip import CLIPEncoderLayer, _make_causal_mask, _expand_mask
 from typing import Optional, Tuple
 
-@inference_mode()
 def forward_penultimate_hidden_state(
   penultimate_hidden_state: FloatTensor,
   final_encoder_layer: CLIPEncoderLayer,
-  input_ids: LongTensor,
+  input_ids_shape: torch.Size,
   attention_mask: Optional[BoolTensor] = None,
 ) -> FloatTensor:
   """
   Args:
     penultimate_hidden_state = text_encoder(…, return_dict=True).hidden_states[-2]
     final_encoder_layer = text_encoder.text_model.encoder.layers[-1]
+    input_ids_shape = input_ids.size()
   Returns:
     Equivalent to text_encoder(…, return_dict=True).hidden_states[-1]
   """
@@ -23,7 +23,7 @@ def forward_penultimate_hidden_state(
     # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
     attention_mask = _expand_mask(attention_mask, penultimate_hidden_state.dtype)
   causal_attention_mask: FloatTensor = _make_causal_mask(
-    input_ids.size(),
+    input_ids_shape=input_ids_shape,
     dtype=penultimate_hidden_state.dtype,
     device=penultimate_hidden_state.device,
   )
@@ -35,7 +35,6 @@ def forward_penultimate_hidden_state(
   last_hidden_states, *_ = layer_out
   return last_hidden_states
 
-@inference_mode()
 def pool_and_project_last_hidden_state(
   # by this I mean hidden_states[-1], not last_hidden_state, which has already been layernormed
   last_hidden_state: FloatTensor,

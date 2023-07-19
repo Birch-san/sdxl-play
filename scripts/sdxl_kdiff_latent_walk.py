@@ -228,7 +228,7 @@ frames: List[SampleSpec] = intersperse_linspace(
 all_zeros_hidden_states: List[Optional[FloatTensor]] = [
   zeros(
     (text_encoder.config.max_position_embeddings, text_encoder.config.hidden_size),
-    dtype=base_unet.dtype,
+    dtype=text_encoder.dtype,
     device=device,
   )
 for text_encoder in text_encoders] if force_zeros_for_empty_prompt else [None, None]
@@ -378,8 +378,11 @@ img_provenance: str = 'refined' if use_refiner else 'base'
 
 print(f'Generating {frames} images, in batches of {max_batch_size}')
 
-embed_caches: List[EmbedCache] = [EmbedCache() for _ in range(2)]
+embed_caches: List[EmbedCache[FloatTensor]] = [EmbedCache[FloatTensor]() for _ in range(2)]
+mask_caches: List[EmbedCache[BoolTensor]] = [EmbedCache[BoolTensor]() for _ in range(2)]
+vit_big_g_input_ids_cache = EmbedCache[LongTensor]()
 vit_l_emb_cache, vit_big_g_emb_cache = embed_caches
+vit_l_mask_cache, vit_big_g_mask_cache = mask_caches
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   batch_size: int = len(batch_frames)
@@ -419,7 +422,9 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         else:
           retained_embed_ixs.add(cache_ix)
   
+  new_vit_big_g_input_ids: Optional[LongTensor] = None
   if new_prompt_texts_ordered:
+    new_masks: List[BoolTensor] = []
     new_hidden_states: List[FloatTensor] = []
     for tokenizer_ix, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
       tokenizer_output: TokenizerOutput = tokenize(
@@ -427,15 +432,23 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         prompts=new_prompt_texts_ordered,
         device=device,
       )
+      attention_mask: BoolTensor = tensor(tokenizer_output.attention_mask, device=device, dtype=torch.bool)
+      new_masks.append(attention_mask)
+      if tokenizer is tok_vit_big_g:
+        new_vit_big_g_input_ids = tokenizer_output.input_ids
       with to_device(text_encoder, device) if swap_models else nullcontext(), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
         embed_out: EmbedderOutput = embed(
           text_encoder=text_encoder,
           tokenizer_output=tokenizer_output,
+          # TODO: consider passing this attention mask to CLIP encoder
+          # attention_mask=attention_mask,
         )
         new_hidden_states.append(embed_out.penultimate_hidden_states)
     new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
   else:
+    new_masks: List[Optional[BoolTensor]] = [None, None]
     new_hidden_states: List[Optional[FloatTensor]] = [None, None]
+  assert new_vit_big_g_input_ids is not None
   new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
 
   if vit_l_emb_cache.cache:
@@ -443,18 +456,68 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       embed_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
       for embed_cache in embed_caches
     ]
+    retained_masks: List[BoolTensor] = [
+      mask_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+      for mask_cache in mask_caches
+    ]
+    retained_vit_big_g_input_ids: BoolTensor = vit_big_g_input_ids_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
   else:
     retained_hidden_states: List[Optional[FloatTensor]] = [None, None]
+    retained_masks: List[Optional[BoolTensor]] = [None, None]
+    retained_vit_big_g_input_ids: Optional[BoolTensor] = None
   retained_vit_l_embeds, retained_vit_big_g_embeds = retained_hidden_states
+  retained_vit_l_masks, retained_vit_big_g_masks = retained_masks
   
-  for retained_hidden_states_, new_hidden_states_, emb_cache, all_zeros_hidden_states_ in zip(retained_hidden_states, new_hidden_states, embed_caches, all_zeros_hidden_states):
+  interped_penult_hidden_states: List[FloatTensor] = []
+  embedding_masks: List[BoolTensor] = []
+  input_ids_: List[LongTensor] = []
+  for (
+    retained_hidden_states_,
+    new_hidden_states_,
+    retained_masks_,
+    new_masks_,
+    retained_input_ids,
+    new_input_ids,
+    emb_cache,
+    mask_cache,
+    input_ids_cache,
+    all_zeros_hidden_states_,
+    ) in zip(
+    retained_hidden_states,
+    new_hidden_states,
+    retained_masks,
+    new_masks,
+    [None, retained_vit_big_g_input_ids],
+    [None, new_vit_big_g_input_ids],
+    embed_caches,
+    mask_caches,
+    [None, vit_big_g_input_ids_cache],
+    all_zeros_hidden_states,
+  ):
     assert retained_hidden_states is not None or new_hidden_states is not None
-    next_cache: LongTensor = cat([t for t in [retained_hidden_states_, new_hidden_states_] if t is not None])
+    next_emb_cache: FloatTensor = cat([t for t in [retained_hidden_states_, new_hidden_states_] if t is not None])
     next_cache_prompts: List[str] = [prompt for ix, prompt in enumerate(emb_cache.prompts) if ix in retained_embed_ixs] + new_prompt_texts_ordered
     emb_cache.update_cache(
-      cache=next_cache,
+      cache=next_emb_cache,
       prompts=next_cache_prompts,
     )
+    # TODO: insert (all-ones?) masks at positions where we're missing masks due to all-zeros uncond special case
+    next_mask_cache: BoolTensor = cat([t for t in [retained_masks_, new_masks_] if t is not None])
+    mask_cache.update_cache(
+      cache=next_mask_cache,
+      prompts=next_cache_prompts,
+    )
+    embedding_masks.append(next_mask_cache)
+
+    if input_ids_cache is None:
+      input_ids_.append(None)
+    else:
+      next_input_ids_cache: BoolTensor = cat([t for t in [retained_input_ids, new_input_ids] if t is not None])
+      input_ids_cache.update_cache(
+        cache=next_input_ids_cache,
+        prompts=next_cache_prompts,
+      )
+      input_ids_.append(next_input_ids_cache)
 
     emb_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_hidden_states_ if text is None else emb_cache.get_by_prompt(text)
 
@@ -480,11 +543,53 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       frame.strategy is InterpStrategy.Lerp if isinstance(frame, InterPrompt) else True for frame in batch_frames
     ]
 
+    orig_dtype: DeviceType = sources.dtype
+    # TODO: perhaps we should ban interpolating from an all-zeros source or to an all-zeros target?
+    #       i.e. output all-zeros if either endpoint is all-zeros?
     interped: FloatTensor = interp_sources_to_targets(
-      sources=sources,
-      targets=targets,
+      sources=sources.float(),
+      targets=targets.float(),
       quotients=quotients,
       wants_lerp=wants_lerp,
+    )
+    interped_penult_hidden_states.append(interped.to(orig_dtype))
+  
+  base_embed: FloatTensor = cat(interped_penult_hidden_states, dim=-1)
+  base_embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
+
+  _, mask_vit_big_g = embedding_masks
+  _, emb_vit_big_g = interped_penult_hidden_states
+  _, input_ids_vit_big_g = input_ids_
+
+  if use_refiner:
+    refiner_embed: FloatTensor = emb_vit_big_g
+    refiner_embedding_mask: BoolTensor = mask_vit_big_g
+
+  with (
+    inference_mode(),
+    to_device(vit_big_g.text_model.encoder.layers[-1], device) if swap_models else nullcontext(),
+    sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
+  ):
+    # TODO: if we're using all-zeros unconds: work out what positions
+    #       have an all-zeros uncond, and don't submit it through this process.
+    #       we will ultimately want an all-zeros pooler output anyway.
+    last_hidden_state_vit_big_g: FloatTensor = forward_penultimate_hidden_state(
+      penultimate_hidden_state=emb_vit_big_g,
+      final_encoder_layer=vit_big_g.text_model.encoder.layers[-1],
+      input_ids_shape=input_ids_vit_big_g.size()
+      # attention_mask=mask_vit_big_g,
+    )
+  with (
+    inference_mode(),
+    to_device(vit_big_g.text_model.final_layer_norm, device) if swap_models else nullcontext(),
+    to_device(vit_big_g.text_projection, device) if swap_models else nullcontext(),
+    sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
+  ):
+    pooled_embed: FloatTensor = pool_and_project_last_hidden_state(
+      last_hidden_state=last_hidden_state_vit_big_g,
+      final_layer_norm=vit_big_g.text_model.final_layer_norm,
+      text_projection=vit_big_g.text_projection,
+      input_ids=input_ids_vit_big_g,
     )
 
   base_added_cond_kwargs = CondKwargs(
@@ -500,6 +605,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   if use_refiner:
     refiner_added_cond_kwargs = CondKwargs(
       text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
+      # TODO: this should probably expand to base_embed.size(0) instead of batch_size -- should give it CFG handling for free, since we dealt with that above
       time_ids=refiner_time_ids.repeat_interleave(batch_size, 0) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0) * batch_size, -1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
