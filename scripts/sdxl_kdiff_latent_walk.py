@@ -7,7 +7,7 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, zeros
+from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, zeros, ones, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable, TypeAlias, Set
@@ -49,7 +49,7 @@ from src.sample_spec.prompts import CFGPrompts, NoCFGPrompts, PromptType
 from src.sample_spec.sample_spec import SampleSpec
 from src.embed_mgmt.make_get_embed import make_get_embed
 from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
-from src.embed_mgmt.get_prompt_text import CFGPole, InterpPole
+from src.embed_mgmt.get_prompt_text import CFGPole, InterpPole, get_prompt_text
 from src.embed_mgmt.embed_batch import embed_batch
 from src.embed_mgmt.mock_embed import mock_embed
 from src.embed_mgmt.embed_cache import EmbedCache
@@ -231,6 +231,14 @@ all_zeros_hidden_states: List[Optional[FloatTensor]] = [
   zeros(
     (text_encoder.config.max_position_embeddings, text_encoder.config.hidden_size),
     dtype=text_encoder.dtype,
+    device=device,
+  )
+for text_encoder in text_encoders] if force_zeros_for_empty_prompt else [None, None]
+
+all_ones_masks: List[Optional[FloatTensor]] = [
+  ones(
+    (text_encoder.config.max_position_embeddings),
+    dtype=torch.bool,
     device=device,
   )
 for text_encoder in text_encoders] if force_zeros_for_empty_prompt else [None, None]
@@ -442,7 +450,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         prompts=new_prompt_texts_ordered,
         device=device,
       )
-      attention_mask: BoolTensor = tensor(tokenizer_output.attention_mask, device=device, dtype=torch.bool)
+      attention_mask: BoolTensor = tokenizer_output.attention_mask
       new_masks.append(attention_mask)
       if tokenizer is tok_vit_big_g:
         new_vit_big_g_input_ids = tokenizer_output.input_ids
@@ -484,6 +492,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   
   interped_penult_hidden_states: List[FloatTensor] = []
   embedding_masks: List[BoolTensor] = []
+  # these are just the input IDs of samples which require interping
   input_ids_: List[Optional[LongTensor]] = []
   pools: List[Optional[FloatTensor]] = []
   for (
@@ -500,6 +509,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     input_ids_cache,
     pool_cache,
     all_zeros_hidden_states_,
+    all_ones_mask,
     all_zeros_pool_,
     ) in zip(
     retained_hidden_states,
@@ -515,6 +525,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     [None, vit_big_g_input_ids_cache],
     [None, vit_big_g_pool_cache],
     all_zeros_hidden_states,
+    all_ones_masks,
     [None, vit_big_g_all_zeros_pool],
   ):
     assert retained_hidden_states is not None or new_hidden_states is not None
@@ -524,13 +535,18 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       cache=next_emb_cache,
       prompts=next_cache_prompts,
     )
-    # TODO: insert (all-ones?) masks at positions where we're missing masks due to all-zeros uncond special case
     next_mask_cache: BoolTensor = cat([t for t in [retained_masks_, new_masks_] if t is not None])
     mask_cache.update_cache(
       cache=next_mask_cache,
       prompts=next_cache_prompts,
     )
-    embedding_masks.append(next_mask_cache)
+    masks: BoolTensor = stack([
+      all_ones_mask if prompt is None else mask_cache.get_by_prompt(prompt) for prompt in [
+        *[get_prompt_text(frame, interp_pole='from', cfg_pole='uncond') for frame in batch_frames] * (cfg_scale > 1),
+        *[get_prompt_text(frame, interp_pole='from', cfg_pole='cond') for frame in batch_frames],
+      ]
+    ])
+    embedding_masks.append(masks)
 
     if input_ids_cache is None:
       input_ids_.append(None)
@@ -540,7 +556,13 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         cache=next_input_ids_cache,
         prompts=next_cache_prompts,
       )
-      input_ids_.append(next_input_ids_cache)
+      input_ids_for_interping: LongTensor = stack([
+        input_ids_cache.get_by_prompt(prompt) for prompt in [
+          *[frame.from_.uncond_prompt for frame in batch_frames if isinstance(frame, InterPrompt) and frame.from_.uncond_prompt is not None] * (cfg_scale > 1),
+          *[frame.from_.prompt for frame in batch_frames if isinstance(frame, InterPrompt)],
+        ]
+      ])
+      input_ids_.append(input_ids_for_interping)
     
     if pool_cache is None:
       pools.append(None)
@@ -611,16 +633,20 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     refiner_embed: FloatTensor = emb_vit_big_g
     refiner_embedding_mask: BoolTensor = mask_vit_big_g
 
+  emb_ixs_needing_interp: LongTensor = tensor([
+    ix for ix, prompt in enumerate([
+      *[frame.from_.uncond_prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames] * (cfg_scale > 1),
+      *[frame.from_.prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames],
+    ]) if prompt is not None
+  ], dtype=torch.long, device=device)
+
   with (
     inference_mode(),
     to_device(vit_big_g.text_model.encoder.layers[-1], device) if swap_models else nullcontext(),
     sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
   ):
-    # TODO: if we're using all-zeros unconds: work out what positions
-    #       have an all-zeros uncond, and don't submit it through this process.
-    #       we will ultimately want an all-zeros pooler output anyway.
     last_hidden_state_vit_big_g: FloatTensor = forward_penultimate_hidden_state(
-      penultimate_hidden_state=emb_vit_big_g,
+      penultimate_hidden_state=emb_vit_big_g.index_select(0, emb_ixs_needing_interp),
       final_encoder_layer=vit_big_g.text_model.encoder.layers[-1],
       input_ids_shape=input_ids_vit_big_g.size()
       # attention_mask=mask_vit_big_g,
@@ -631,28 +657,33 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     to_device(vit_big_g.text_projection, device) if swap_models else nullcontext(),
     sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
   ):
-    pooled_embed: FloatTensor = pool_and_project_last_hidden_state(
+    pooled_interped_embeds: FloatTensor = pool_and_project_last_hidden_state(
       last_hidden_state=last_hidden_state_vit_big_g,
       final_layer_norm=vit_big_g.text_model.final_layer_norm,
       text_projection=vit_big_g.text_projection,
       input_ids=input_ids_vit_big_g,
     )
 
+  pooled_embed: FloatTensor = pools_vit_big_g.scatter(
+    0,
+    emb_ixs_needing_interp.unsqueeze(-1).expand(-1, pools_vit_big_g.size(-1)),
+    pooled_interped_embeds,
+  )
+
   base_added_cond_kwargs = CondKwargs(
-    text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-    time_ids=base_time_ids.expand(base_embed.size(0) * batch_size, -1),
+    text_embeds=pooled_embed,
+    time_ids=base_time_ids.expand(base_embed.size(0), -1),
   )
   base_denoiser: Denoiser = base_denoiser_factory(
-    cross_attention_conds=base_embed.repeat_interleave(batch_size, 0),
+    cross_attention_conds=base_embed,
     added_cond_kwargs=base_added_cond_kwargs,
     # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
     # cross_attention_mask=base_embedding_mask.repeat(batch_size, 1),
   )
   if use_refiner:
     refiner_added_cond_kwargs = CondKwargs(
-      text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
-      # TODO: this should probably expand to base_embed.size(0) instead of batch_size -- should give it CFG handling for free, since we dealt with that above
-      time_ids=refiner_time_ids.repeat_interleave(batch_size, 0) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0) * batch_size, -1),
+      text_embeds=pooled_embed,
+      time_ids=refiner_time_ids.repeat_interleave(batch_size, 0) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0), -1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
       cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
