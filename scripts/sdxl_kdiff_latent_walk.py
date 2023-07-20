@@ -70,16 +70,17 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-use_refiner = False
-# TODO: uncomment Unet bits once we're done with text encoding
-# unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
-#   f'stabilityai/stable-diffusion-xl-{expert}-0.9',
-#   torch_dtype=torch.float16,
-#   use_safetensors=True,
-#   variant='fp16',
-#   subfolder='unet',
-# ).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
-unets: List[UNet2DConditionModel] = [UNet2DConditionModel()]
+# use_refiner = False
+use_refiner = True
+# # TODO: uncomment Unet bits once we're done with text encoding
+unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
+  f'stabilityai/stable-diffusion-xl-{expert}-0.9',
+  torch_dtype=torch.float16,
+  use_safetensors=True,
+  variant='fp16',
+  subfolder='unet',
+).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
+# unets: List[UNet2DConditionModel] = [UNet2DConditionModel()]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
 
@@ -114,28 +115,28 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-# TODO: uncomment VAE bits once we're done with text encoding and Unet
-# vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-#   # 'stabilityai/stable-diffusion-xl-base-0.9',
-#   'madebyollin/sdxl-vae-fp16-fix',
-#   # decoder gets NaN result in float16.
-#   # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
-#   torch_dtype=torch.float16,
-#   use_safetensors=True,
-#   # variant='fp16',
-#   # subfolder='vae',
-# )
+# # TODO: uncomment VAE bits once we're done with text encoding and Unet
+vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+  # 'stabilityai/stable-diffusion-xl-base-0.9',
+  'madebyollin/sdxl-vae-fp16-fix',
+  # decoder gets NaN result in float16.
+  # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  torch_dtype=torch.float16,
+  use_safetensors=True,
+  # variant='fp16',
+  # subfolder='vae',
+)
 # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
 # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
 # TODO: rather than slicing *everything* (submit smaller image):
 #       would it be faster to just slice the *attention* (serialize into n groups of (batch, head))?
 #       because attention is likely to be the main layer at threat of encountering OOM.
 #       i.e. vae.set_attn_processor(SlicedAttnProcessor())
-# vae.enable_slicing()
+vae.enable_slicing()
 # this script won't be using the encoder
-# del vae.encoder
-# vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
-vae_scale_factor=8
+del vae.encoder
+vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
+# vae_scale_factor=8
 
 def round_down(num: int, divisor: int) -> int:
   return num - (num % divisor)
@@ -314,8 +315,8 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-# schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
-schedule_template = KarrasScheduleTemplate.Prototyping
+schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+# schedule_template = KarrasScheduleTemplate.Mastering
 schedule: KarrasScheduleParams = get_template_schedule(
   schedule_template,
   model_sigma_min=base_unet_k_wrapped.sigma_min,
@@ -383,8 +384,8 @@ seed = 14600
 
 if not swap_models:
   base_unet.to(device)
-  # TODO: uncomment VAE bits once we're done with text encoding and Unet
-  # vae.to(device)
+  # # TODO: uncomment VAE bits once we're done with text encoding and Unet
+  vae.to(device)
   if use_refiner:
     refiner_unet.to(device)
   for text_encoder in text_encoders:
@@ -403,7 +404,7 @@ vit_l_mask_cache, vit_big_g_mask_cache = mask_caches
 
 for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   batch_size: int = len(batch_frames)
-  print(f'Generating a batch of {batch_size} images, seeds {batch_frames}')
+  print(f'Generating a batch of {batch_size} images, prompts {[frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.prompt.split(",")[0] for frame in batch_frames]}, quotients {[f"{frame.quotient:.02f}" if isinstance(frame, InterPrompt) else "0" for frame in batch_frames]}')
   latents: FloatTensor = randn(
     (
       latents_shape.channels,
@@ -468,25 +469,24 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   else:
     new_masks: List[Optional[BoolTensor]] = [None, None]
     new_hidden_states: List[Optional[FloatTensor]] = [None, None]
-  assert new_vit_big_g_input_ids is not None
   new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
 
-  if vit_l_emb_cache.cache:
-    retained_hidden_states: List[FloatTensor] = [
-      embed_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
-      for embed_cache in embed_caches
-    ]
-    retained_masks: List[BoolTensor] = [
-      mask_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
-      for mask_cache in mask_caches
-    ]
-    retained_vit_big_g_input_ids: LongTensor = vit_big_g_input_ids_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
-    retained_vit_big_g_pools: FloatTensor = vit_big_g_pool_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
-  else:
+  if vit_l_emb_cache.cache is None:
     retained_hidden_states: List[Optional[FloatTensor]] = [None, None]
     retained_masks: List[Optional[BoolTensor]] = [None, None]
     retained_vit_big_g_input_ids: Optional[LongTensor] = None
     retained_vit_big_g_pools: Optional[FloatTensor] = None
+  else:
+    retained_hidden_states: List[FloatTensor] = [
+      embed_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64, device=device))
+      for embed_cache in embed_caches
+    ]
+    retained_masks: List[BoolTensor] = [
+      mask_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64, device=device))
+      for mask_cache in mask_caches
+    ]
+    retained_vit_big_g_input_ids: LongTensor = vit_big_g_input_ids_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64, device=device))
+    retained_vit_big_g_pools: FloatTensor = vit_big_g_pool_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64, device=device))
   retained_vit_l_embeds, retained_vit_big_g_embeds = retained_hidden_states
   retained_vit_l_masks, retained_vit_big_g_masks = retained_masks
   
@@ -556,13 +556,14 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         cache=next_input_ids_cache,
         prompts=next_cache_prompts,
       )
-      input_ids_for_interping: LongTensor = stack([
+      input_ids_for_interping: List[int] = [
         input_ids_cache.get_by_prompt(prompt) for prompt in [
           *[frame.from_.uncond_prompt for frame in batch_frames if isinstance(frame, InterPrompt) and frame.from_.uncond_prompt is not None] * (cfg_scale > 1),
           *[frame.from_.prompt for frame in batch_frames if isinstance(frame, InterPrompt)],
         ]
-      ])
-      input_ids_.append(input_ids_for_interping)
+      ]
+      input_ids_for_interping_t: Optional[LongTensor] = stack(input_ids_for_interping) if input_ids_for_interping else None
+      input_ids_.append(input_ids_for_interping_t)
     
     if pool_cache is None:
       pools.append(None)
@@ -633,42 +634,44 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     refiner_embed: FloatTensor = emb_vit_big_g
     refiner_embedding_mask: BoolTensor = mask_vit_big_g
 
-  emb_ixs_needing_interp: LongTensor = tensor([
-    ix for ix, prompt in enumerate([
-      *[frame.from_.uncond_prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames] * (cfg_scale > 1),
-      *[frame.from_.prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames],
-    ]) if prompt is not None
-  ], dtype=torch.long, device=device)
+  if input_ids_vit_big_g is None:
+    pooled_embed: FloatTensor = pools_vit_big_g
+  else:
+    emb_ixs_needing_interp: LongTensor = tensor([
+      ix for ix, prompt in enumerate([
+        *[frame.from_.uncond_prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames] * (cfg_scale > 1),
+        *[frame.from_.prompt if isinstance(frame, InterPrompt) else None for frame in batch_frames],
+      ]) if prompt is not None
+    ], dtype=torch.long, device=device)
+    with (
+      inference_mode(),
+      to_device(vit_big_g.text_model.encoder.layers[-1], device) if swap_models else nullcontext(),
+      sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
+    ):
+      last_hidden_state_vit_big_g: FloatTensor = forward_penultimate_hidden_state(
+        penultimate_hidden_state=emb_vit_big_g.index_select(0, emb_ixs_needing_interp),
+        final_encoder_layer=vit_big_g.text_model.encoder.layers[-1],
+        input_ids_shape=input_ids_vit_big_g.size()
+        # attention_mask=mask_vit_big_g,
+      )
+    with (
+      inference_mode(),
+      to_device(vit_big_g.text_model.final_layer_norm, device) if swap_models else nullcontext(),
+      to_device(vit_big_g.text_projection, device) if swap_models else nullcontext(),
+      sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
+    ):
+      pooled_interped_embeds: FloatTensor = pool_and_project_last_hidden_state(
+        last_hidden_state=last_hidden_state_vit_big_g,
+        final_layer_norm=vit_big_g.text_model.final_layer_norm,
+        text_projection=vit_big_g.text_projection,
+        input_ids=input_ids_vit_big_g,
+      )
 
-  with (
-    inference_mode(),
-    to_device(vit_big_g.text_model.encoder.layers[-1], device) if swap_models else nullcontext(),
-    sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
-  ):
-    last_hidden_state_vit_big_g: FloatTensor = forward_penultimate_hidden_state(
-      penultimate_hidden_state=emb_vit_big_g.index_select(0, emb_ixs_needing_interp),
-      final_encoder_layer=vit_big_g.text_model.encoder.layers[-1],
-      input_ids_shape=input_ids_vit_big_g.size()
-      # attention_mask=mask_vit_big_g,
-    )
-  with (
-    inference_mode(),
-    to_device(vit_big_g.text_model.final_layer_norm, device) if swap_models else nullcontext(),
-    to_device(vit_big_g.text_projection, device) if swap_models else nullcontext(),
-    sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext()
-  ):
-    pooled_interped_embeds: FloatTensor = pool_and_project_last_hidden_state(
-      last_hidden_state=last_hidden_state_vit_big_g,
-      final_layer_norm=vit_big_g.text_model.final_layer_norm,
-      text_projection=vit_big_g.text_projection,
-      input_ids=input_ids_vit_big_g,
-    )
-
-  pooled_embed: FloatTensor = pools_vit_big_g.scatter(
-    0,
-    emb_ixs_needing_interp.unsqueeze(-1).expand(-1, pools_vit_big_g.size(-1)),
-    pooled_interped_embeds,
-  )
+      pooled_embed: FloatTensor = pools_vit_big_g.scatter(
+        0,
+        emb_ixs_needing_interp.unsqueeze(-1).expand(-1, pools_vit_big_g.size(-1)),
+        pooled_interped_embeds,
+      )
 
   base_added_cond_kwargs = CondKwargs(
     text_embeds=pooled_embed,
@@ -686,7 +689,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       time_ids=refiner_time_ids.repeat_interleave(batch_size, 0) if cfg_scale > 1. else refiner_time_ids.expand(base_embed.size(0), -1),
     )
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
-      cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
+      cross_attention_conds=refiner_embed,
       added_cond_kwargs=refiner_added_cond_kwargs,
       # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
       # cross_attention_mask=refiner_embedding_mask.repeat(batch_size, 1),
