@@ -49,7 +49,7 @@ from src.sample_spec.prompts import CFGPrompts, NoCFGPrompts, PromptType
 from src.sample_spec.sample_spec import SampleSpec
 from src.embed_mgmt.make_get_embed import make_get_embed
 from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
-from src.embed_mgmt.get_prompt_text import InterpPole
+from src.embed_mgmt.get_prompt_text import CFGPole, InterpPole
 from src.embed_mgmt.embed_batch import embed_batch
 from src.embed_mgmt.mock_embed import mock_embed
 from src.embed_mgmt.embed_cache import EmbedCache
@@ -205,7 +205,9 @@ interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
   steps=3,
   manner=InterpManner(
     quotient_modifier=modifier,
-    strategy=InterpStrategy.Slerp,
+    # SDXL is conditioned on penultimate hidden states, which haven't been normalized.
+    # this means it doesn't make sense to slerp (as fun as that would be).
+    strategy=InterpStrategy.Lerp,
   ),
 ) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
 
@@ -232,6 +234,12 @@ all_zeros_hidden_states: List[Optional[FloatTensor]] = [
     device=device,
   )
 for text_encoder in text_encoders] if force_zeros_for_empty_prompt else [None, None]
+
+vit_big_g_all_zeros_pool: FloatTensor = zeros(
+  (vit_big_g.config.hidden_size,),
+  dtype=vit_big_g.dtype,
+  device=device,
+)
 
 # all_zeros_pooled_clip_vit_big_g
 
@@ -376,11 +384,12 @@ if not swap_models:
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
-print(f'Generating {frames} images, in batches of {max_batch_size}')
+print(f'Generating {len(frames)} images, in batches of {max_batch_size}')
 
 embed_caches: List[EmbedCache[FloatTensor]] = [EmbedCache[FloatTensor]() for _ in range(2)]
 mask_caches: List[EmbedCache[BoolTensor]] = [EmbedCache[BoolTensor]() for _ in range(2)]
 vit_big_g_input_ids_cache = EmbedCache[LongTensor]()
+vit_big_g_pool_cache = EmbedCache[FloatTensor]()
 vit_l_emb_cache, vit_big_g_emb_cache = embed_caches
 vit_l_mask_cache, vit_big_g_mask_cache = mask_caches
 
@@ -423,6 +432,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
           retained_embed_ixs.add(cache_ix)
   
   new_vit_big_g_input_ids: Optional[LongTensor] = None
+  new_vit_big_g_pools: Optional[FloatTensor] = None
   if new_prompt_texts_ordered:
     new_masks: List[BoolTensor] = []
     new_hidden_states: List[FloatTensor] = []
@@ -444,6 +454,8 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
           # attention_mask=attention_mask,
         )
         new_hidden_states.append(embed_out.penultimate_hidden_states)
+      if text_encoder is vit_big_g:
+        new_vit_big_g_pools = embed_out.norm_pooled
     new_encoded_vit_l, new_encoded_vit_big_g = new_hidden_states
   else:
     new_masks: List[Optional[BoolTensor]] = [None, None]
@@ -460,17 +472,20 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       mask_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
       for mask_cache in mask_caches
     ]
-    retained_vit_big_g_input_ids: BoolTensor = vit_big_g_input_ids_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+    retained_vit_big_g_input_ids: LongTensor = vit_big_g_input_ids_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
+    retained_vit_big_g_pools: FloatTensor = vit_big_g_pool_cache.cache.index_select(0, tensor(list(retained_embed_ixs), dtype=torch.int64))
   else:
     retained_hidden_states: List[Optional[FloatTensor]] = [None, None]
     retained_masks: List[Optional[BoolTensor]] = [None, None]
-    retained_vit_big_g_input_ids: Optional[BoolTensor] = None
+    retained_vit_big_g_input_ids: Optional[LongTensor] = None
+    retained_vit_big_g_pools: Optional[FloatTensor] = None
   retained_vit_l_embeds, retained_vit_big_g_embeds = retained_hidden_states
   retained_vit_l_masks, retained_vit_big_g_masks = retained_masks
   
   interped_penult_hidden_states: List[FloatTensor] = []
   embedding_masks: List[BoolTensor] = []
-  input_ids_: List[LongTensor] = []
+  input_ids_: List[Optional[LongTensor]] = []
+  pools: List[Optional[FloatTensor]] = []
   for (
     retained_hidden_states_,
     new_hidden_states_,
@@ -478,10 +493,14 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     new_masks_,
     retained_input_ids,
     new_input_ids,
+    retained_pools,
+    new_pools,
     emb_cache,
     mask_cache,
     input_ids_cache,
+    pool_cache,
     all_zeros_hidden_states_,
+    all_zeros_pool_,
     ) in zip(
     retained_hidden_states,
     new_hidden_states,
@@ -489,10 +508,14 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     new_masks,
     [None, retained_vit_big_g_input_ids],
     [None, new_vit_big_g_input_ids],
+    [None, retained_vit_big_g_pools],
+    [None, new_vit_big_g_pools],
     embed_caches,
     mask_caches,
     [None, vit_big_g_input_ids_cache],
+    [None, vit_big_g_pool_cache],
     all_zeros_hidden_states,
+    [None, vit_big_g_all_zeros_pool],
   ):
     assert retained_hidden_states is not None or new_hidden_states is not None
     next_emb_cache: FloatTensor = cat([t for t in [retained_hidden_states_, new_hidden_states_] if t is not None])
@@ -512,16 +535,38 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
     if input_ids_cache is None:
       input_ids_.append(None)
     else:
-      next_input_ids_cache: BoolTensor = cat([t for t in [retained_input_ids, new_input_ids] if t is not None])
+      next_input_ids_cache: LongTensor = cat([t for t in [retained_input_ids, new_input_ids] if t is not None])
       input_ids_cache.update_cache(
         cache=next_input_ids_cache,
         prompts=next_cache_prompts,
       )
       input_ids_.append(next_input_ids_cache)
+    
+    if pool_cache is None:
+      pools.append(None)
+    else:
+      next_pool_cache: FloatTensor = cat([t for t in [retained_pools, new_pools] if t is not None])
+      pool_cache.update_cache(
+        cache=next_pool_cache,
+        prompts=next_cache_prompts,
+      )
+      emb_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_pool_ if text is None else pool_cache.get_by_prompt(text)
+
+      make_get_embed_: Callable[[CFGPole], GetEmbed] = partial(
+        make_get_embed,
+        embedding_from_optional_text=emb_from_optional_text,
+        interp_pole='from',
+      )
+      pool_sources: FloatTensor = embed_batch(
+        batch_frames=batch_frames,
+        get_cond_embed=make_get_embed_(cfg_pole='cond'),
+        get_uncond_embed=make_get_embed_(cfg_pole='uncond') if cfg_scale > 1 else None,
+      )
+      pools.append(pool_sources)
 
     emb_from_optional_text: EmbeddingFromOptionalText = lambda text: all_zeros_hidden_states_ if text is None else emb_cache.get_by_prompt(text)
 
-    make_make_get_embed: Callable[[InterpPole], GetEmbed] = lambda interp_pole: partial(
+    make_make_get_embed: Callable[[InterpPole], Callable[[CFGPole], GetEmbed]] = lambda interp_pole: partial(
       make_get_embed,
       embedding_from_optional_text=emb_from_optional_text,
       interp_pole=interp_pole,
@@ -560,6 +605,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   _, mask_vit_big_g = embedding_masks
   _, emb_vit_big_g = interped_penult_hidden_states
   _, input_ids_vit_big_g = input_ids_
+  _, pools_vit_big_g = pools
 
   if use_refiner:
     refiner_embed: FloatTensor = emb_vit_big_g
