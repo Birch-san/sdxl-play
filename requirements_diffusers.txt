@@ -12,3 +12,4 @@ onnxruntime
 # so you should install this manualy
 # invisible-watermark --no-deps
 k-diffusion>=0.0.15
+easing-functions
