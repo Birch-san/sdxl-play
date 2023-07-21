@@ -420,7 +420,7 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.prompt.split(",")[0]}_{f"{frame.quotient:.02f}_" if isinstance(frame, InterPrompt) else ""}{seed}'
+    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{frame.from_.prompt.split(",")[0] if isinstance(frame, InterPrompt) else frame.prompt.split(",")[0]}_{f"{frame.quotient:.02f}_" if isinstance(frame, InterPrompt) else ""}{seed}'
     for sample_ix, frame in enumerate(batch_frames)
   ]
 
