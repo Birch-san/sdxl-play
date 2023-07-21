@@ -33,6 +33,13 @@
       "justMyCode": false,
     },
     {
+      "name": "Python: SDXL k-diffusion latent walk",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.sdxl_kdiff_latent_walk",
+      "justMyCode": false,
+    },
+    {
       "name": "Python: in-between test",
       "type": "python",
       "request": "launch",
