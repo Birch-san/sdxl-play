@@ -200,17 +200,19 @@ keyframes: List[PromptType] = [
   ]
 ]
 
-quotient_modifiers: List[QuotientModifier] = [lambda x:x, CubicEaseInOut()]
+# quotient_modifiers: List[QuotientModifier] = [lambda x:x, CubicEaseInOut()]
+modifier: QuotientModifier = lambda x:x
 
 interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
-  steps=3,
+  steps=10,
   manner=InterpManner(
     quotient_modifier=modifier,
     # SDXL is conditioned on penultimate hidden states, which haven't been normalized.
     # this means it doesn't make sense to slerp (as fun as that would be).
     strategy=InterpStrategy.Lerp,
   ),
-) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
+) for _ in range(len(keyframes)-1)]
+# ) for _, modifier in zip(range(len(keyframes)-1), quotient_modifiers)]
 
 def make_inbetween(params: ManneredInBetweenParams[PromptType, InterpManner]) -> InterPrompt[PromptType]:
   # apply easing function
