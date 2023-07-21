@@ -21,6 +21,7 @@ import fnmatch
 from pathlib import Path
 from PIL import Image
 from functools import partial
+from time import perf_counter
 
 from src.iteration.batched import batched
 from src.denoisers.denoiser_proto import Denoiser
@@ -117,6 +118,8 @@ if use_flash_attn_qkv_packed:
         else:
           mod.set_processor(cross_attn_processor)
     unet.apply(set_flash_attn_processor)
+
+measure_sampling = False
 
 compile = False
 if compile:
@@ -762,6 +765,8 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
   #   seed=seeds[0],
   # )
 
+  unet_start: float = perf_counter()
+
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
     denoised_latents: FloatTensor = sample_dpmpp_2m(
       denoiser,
@@ -770,6 +775,12 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       # callback=callback,
     ).to(vae.dtype)
+
+  if measure_sampling:
+    torch.cuda.synchronize(device=device)
+
+    unet_duration: float = perf_counter()-unet_start
+    print(f'batch-of-{batch_size}: {unet_duration:.2f} secs')
 
   if swap_models:
     refiner_unet.cpu()
