@@ -20,8 +20,7 @@ def embed(
   """
   encoder_out: Union[BaseModelOutputWithPooling, CLIPTextModelOutput] = text_encoder(
     input_ids=tokenizer_output.input_ids,
-    # TODO: check what mask is like. I dunno whether these CLIPs were trained with masked input, and dunno whether Stability
-    #       inferenced from these CLIPs with a mask, but my guess for the latter is not.
+    # don't pass the mask in; the result is horrible. I guess it was trained on pad tokens?
     # attention_mask=tokenizer_output.attention_mask,
     output_hidden_states=True,
     return_dict=True,

@@ -498,8 +498,6 @@ for batch_ix, batch_frames in enumerate(batched(frames, max_batch_size)):
         embed_out: EmbedderOutput = embed(
           text_encoder=text_encoder,
           tokenizer_output=tokenizer_output,
-          # TODO: consider passing this attention mask to CLIP encoder
-          # attention_mask=attention_mask,
         )
         new_hidden_states.append(embed_out.penultimate_hidden_states)
       if text_encoder is vit_big_g:
