@@ -209,21 +209,6 @@ cfg_rescale = 0.
 force_zeros_for_empty_prompt = True
 uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
-# keyframes: List[PromptType] = [
-#   CFGPrompts(
-#     uncond_prompt=uncond_prompt,
-#     prompt='hello',
-#   ),
-#   CFGPrompts(
-#     uncond_prompt=uncond_prompt,
-#     prompt='fellow',
-#   ),
-#   CFGPrompts(
-#     uncond_prompt=uncond_prompt,
-#     prompt='geese',
-#   )
-# ]
-
 keyframes: List[PromptType] = [
   CFGPrompts(
     uncond_prompt=uncond_prompt,
@@ -231,9 +216,23 @@ keyframes: List[PromptType] = [
   ) if cfg_scale > 1 else NoCFGPrompts(
     prompt=prompt,
   ) for prompt in [
-    'girl riding dragon, flying over water, masterpiece, dramatic, highly detailed, high dynamic range',
+    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
+    'the dragon attacks at night, masterpiece, dramatic, highly detailed, high dynamic range',
+    'the dragon attacks Neo-Tokyo at night, masterpiece, dramatic, highly detailed, high dynamic range',
+    'watercolour illustration of Japanese lanterns floating down river, festival, moonlight',
+    'thousands of fireflies on the river at night, moonlight, grass, trees, 4k, dslr, cinematic, masterpiece',
+    'photo of astronaut meditating under waterfall, in swimming shorts, moonlight, breathtaking, 4k, dslr, cinematic, global illumination, realistic, highly detailed',
+    'character portrait of steampunk lady, ponytail, hat, masterpiece, intricate detail',
+    'art of refined steampunk gentleman, wearing suspenders, holding timepiece, monocle, well-groomed beard and moustache',
+    'an explorer struggles to get out of quicksand',
+    'an explorer struggles to get out of quicksand, desert',
     'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
     'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
+    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto, vaporwave',
+    'fish swimming up waterfall of mercury, aurora borealis',
+    'illustration of gamer girl with blue hair, sitting in chair with knees up, focusing intently on computer',
+    'illustration of gamer girl with pink hair, sitting in chair with knees up, focusing intently on computer',
+    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
   ]
 ]
 
@@ -241,7 +240,7 @@ keyframes: List[PromptType] = [
 modifier: QuotientModifier = lambda x:x
 
 interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
-  steps=10,
+  steps=100,
   manner=InterpManner(
     quotient_modifier=modifier,
     # SDXL is conditioned on penultimate hidden states, which haven't been normalized.
@@ -417,7 +416,7 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 2
+max_batch_size = 8
 
 seed = 14600
 
