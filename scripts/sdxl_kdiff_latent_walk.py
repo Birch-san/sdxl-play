@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
+from diffusers.models.attention import Attention
 from easing_functions import CubicEaseInOut
 from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
@@ -10,6 +11,7 @@ import torch
 from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, zeros, ones, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
+from torch.nn import Module, Linear
 from typing import List, Union, Optional, Callable, TypeAlias, Set
 from logging import getLogger, Logger
 from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
@@ -55,6 +57,7 @@ from src.embed_mgmt.mock_embed import mock_embed
 from src.embed_mgmt.embed_cache import EmbedCache
 from src.latent_walk.interp_sources_to_targets import interp_sources_to_targets
 from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_last_hidden_state
+from src.flash_attn_processor import FlashAttnProcessor, FlashAttnQKVPackedProcessor
 
 logger: Logger = getLogger(__file__)
 
@@ -83,6 +86,37 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
 # unets: List[UNet2DConditionModel] = [UNet2DConditionModel()]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
+
+use_xformers_attn = False
+if use_xformers_attn:
+  from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+  for unet in unets:
+    unet.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
+
+use_flash_attn = False
+if use_flash_attn:
+  for unet in unets:
+    processor = FlashAttnProcessor()
+    unet.set_attn_processor(processor)
+
+use_flash_attn_qkv_packed = True
+if use_flash_attn_qkv_packed:
+  for unet in unets:
+    cross_attn_processor = FlashAttnProcessor()
+    self_attn_processor = FlashAttnQKVPackedProcessor()
+
+    def set_flash_attn_processor(mod: Module) -> None:
+      if isinstance(mod, Attention):
+        # relying on a side-channel, but it's not like diffusers provide a better way
+        # to determine that a layer is self-attention
+        if mod.to_k.in_features == mod.to_q.in_features:
+          mod.to_qkv = Linear(mod.to_q.in_features, mod.to_q.out_features*3, dtype=mod.to_q.weight.dtype, device=device)
+          mod.to_qkv.weight.data = cat([mod.to_q.weight, mod.to_k.weight, mod.to_v.weight]).detach()
+          del mod.to_q, mod.to_k, mod.to_v
+          mod.set_processor(self_attn_processor)
+        else:
+          mod.set_processor(cross_attn_processor)
+    unet.apply(set_flash_attn_processor)
 
 compile = False
 if compile:
