@@ -32,5 +32,12 @@
       "module": "scripts.sdxl_kdiff_play",
       "justMyCode": false,
     },
+    {
+      "name": "Python: in-between test",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.in_between_test",
+      "justMyCode": false,
+    },
   ]
 }

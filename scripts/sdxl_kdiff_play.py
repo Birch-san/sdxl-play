@@ -5,7 +5,7 @@ from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithPr
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 import torch
-from torch import BoolTensor, FloatTensor, Generator, inference_mode, cat, randn, tensor, stack
+from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable
@@ -93,14 +93,14 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  'stabilityai/stable-diffusion-xl-base-0.9',
+  # 'stabilityai/stable-diffusion-xl-base-0.9',
+  'madebyollin/sdxl-vae-fp16-fix',
   # decoder gets NaN result in float16.
-  # strictly speaking we probably only need to upcast the self-attention in the mid-block,
-  # rather than everything. but diffusers doesn't expose a way to do this.
-  torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  torch_dtype=torch.float16,
   use_safetensors=True,
-  variant='fp16',
-  subfolder='vae',
+  # variant='fp16',
+  # subfolder='vae',
 )
 # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
 # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
@@ -179,8 +179,8 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
     if num_truncated > 0:
       logger.warning(f"Prompt {prompt_ix} will be truncated, due to exceeding tokenizer {tokenizer_ix}'s length limit by {num_truncated} tokens. Overflowing portion of text was: <{overflow_decoded}>")
 
-  input_ids=tensor(tokenized.input_ids, device=device)
-  attention_mask=tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
+  input_ids: LongTensor = tensor(tokenized.input_ids, device=device)
+  attention_mask: BoolTensor = tensor(tokenized.attention_mask, device=device, dtype=torch.bool)
   embedding_masks.append(attention_mask)
 
   with to_device(text_encoder, device), inference_mode(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
@@ -372,7 +372,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   ]).to(device)
   latents *= start_sigma
 
-  out_stems: str = [
+  out_stems: List[str] = [
     f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
     for sample_ix, seed in enumerate(batch_seeds)
   ]
