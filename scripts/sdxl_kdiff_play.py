@@ -35,6 +35,8 @@ from src.dimensions import Dimensions
 from src.time_ids import get_time_ids, get_time_ids_aesthetic
 from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
+from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
+from src.attn.flash_attn_processor import FlashAttnProcessor
 
 logger: Logger = getLogger(__file__)
 
@@ -71,6 +73,23 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
 ]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
+
+use_xformers_attn = False
+if use_xformers_attn:
+  from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+  for unet in unets:
+    unet.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
+
+use_flash_attn = False
+if use_flash_attn:
+  for unet in unets:
+    processor = FlashAttnProcessor()
+    unet.set_attn_processor(processor)
+
+use_flash_attn_qkv_packed = True
+if use_flash_attn_qkv_packed:
+  for unet in unets:
+    apply_flash_attn_processor(unet)
 
 compile = False
 if compile:

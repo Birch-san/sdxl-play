@@ -54,7 +54,8 @@ from src.embed_mgmt.embed_batch import embed_batch
 from src.embed_mgmt.embed_cache import EmbedCache
 from src.latent_walk.interp_sources_to_targets import interp_sources_to_targets
 from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_last_hidden_state
-from src.flash_attn_processor import FlashAttnProcessor, FlashAttnQKVPackedProcessor
+from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
+from src.attn.flash_attn_processor import FlashAttnProcessor
 
 logger: Logger = getLogger(__file__)
 
@@ -107,21 +108,7 @@ if use_flash_attn:
 use_flash_attn_qkv_packed = True
 if use_flash_attn_qkv_packed:
   for unet in unets:
-    cross_attn_processor = FlashAttnProcessor()
-    self_attn_processor = FlashAttnQKVPackedProcessor()
-
-    def set_flash_attn_processor(mod: Module) -> None:
-      if isinstance(mod, Attention):
-        # relying on a side-channel, but it's not like diffusers provide a better way
-        # to determine that a layer is self-attention
-        if mod.to_k.in_features == mod.to_q.in_features:
-          mod.to_qkv = Linear(mod.to_q.in_features, mod.to_q.out_features*3, dtype=mod.to_q.weight.dtype, device=device)
-          mod.to_qkv.weight.data = cat([mod.to_q.weight, mod.to_k.weight, mod.to_v.weight]).detach()
-          del mod.to_q, mod.to_k, mod.to_v
-          mod.set_processor(self_attn_processor)
-        else:
-          mod.set_processor(cross_attn_processor)
-    unet.apply(set_flash_attn_processor)
+    apply_flash_attn_processor(unet)
 
 measure_sampling = False
 
