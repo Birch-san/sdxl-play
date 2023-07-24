@@ -1,5 +1,4 @@
 from contextlib import nullcontext
-from dataclasses import dataclass
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
 from diffusers.models.attention import Attention
@@ -12,7 +11,7 @@ from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from torch.nn import Module, Linear
-from typing import List, Union, Optional, Callable, TypeAlias, Set
+from typing import List, Optional, Callable, Set, Dict, Any
 from logging import getLogger, Logger
 from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
 from os import makedirs, listdir
@@ -54,7 +53,6 @@ from src.embed_mgmt.make_get_embed import make_get_embed
 from src.embed_mgmt.get_embed import GetEmbed, EmbeddingFromOptionalText
 from src.embed_mgmt.get_prompt_text import CFGPole, InterpPole, get_prompt_text
 from src.embed_mgmt.embed_batch import embed_batch
-from src.embed_mgmt.mock_embed import mock_embed
 from src.embed_mgmt.embed_cache import EmbedCache
 from src.latent_walk.interp_sources_to_targets import interp_sources_to_targets
 from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_last_hidden_state
@@ -74,17 +72,25 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-# use_refiner = False
+use_wdxl = False
+
+stability_model_name = 'stabilityai/stable-diffusion-xl-base-0.9'
+wdxl_model_name = 'Birchlabs/waifu-diffusion-xl-unofficial'
+default_model_name = stability_model_name
+base_unet_model_name = wdxl_model_name if use_wdxl else stability_model_name
+
 use_refiner = True
-# # TODO: uncomment Unet bits once we're done with text encoding
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
-  f'stabilityai/stable-diffusion-xl-{expert}-0.9',
+  unet_name,
   torch_dtype=torch.float16,
   use_safetensors=True,
   variant='fp16',
   subfolder='unet',
-).eval() for expert in ['base', *(['refiner'] * use_refiner)]]
-# unets: List[UNet2DConditionModel] = [UNet2DConditionModel()]
+).eval() for unet_name in [
+  base_unet_model_name,
+  *(['stabilityai/stable-diffusion-xl-refiner-0.9'] * use_refiner),
+  ]
+]
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
 
@@ -127,7 +133,7 @@ if compile:
     torch.compile(unet, mode='reduce-overhead', fullgraph=True)
 
 tokenizers: List[CLIPTokenizer] = [CLIPTokenizer.from_pretrained(
-  'stabilityai/stable-diffusion-xl-base-0.9',
+  default_model_name,
   subfolder=subfolder,
 ) for subfolder in ('tokenizer', 'tokenizer_2')]
 tok_vit_l, tok_vit_big_g = tokenizers
@@ -135,7 +141,7 @@ tok_vit_l, tok_vit_big_g = tokenizers
 # base uses ViT-L **and** ViT-bigG
 # refiner uses just ViT-bigG
 vit_l: CLIPTextModel = CLIPTextModel.from_pretrained(
-  'stabilityai/stable-diffusion-xl-base-0.9',
+  default_model_name,
   torch_dtype=torch.float16,
   use_safetensors=True,
   variant='fp16',
@@ -143,7 +149,7 @@ vit_l: CLIPTextModel = CLIPTextModel.from_pretrained(
 ).eval()
 
 vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretrained(
-  'stabilityai/stable-diffusion-xl-base-0.9',
+  default_model_name,
   torch_dtype=torch.float16,
   use_safetensors=True,
   variant='fp16',
@@ -152,16 +158,20 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-# # TODO: uncomment VAE bits once we're done with text encoding and Unet
-vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  # 'stabilityai/stable-diffusion-xl-base-0.9',
-  'madebyollin/sdxl-vae-fp16-fix',
+use_ollin_vae = True
+vae_kwargs: Dict[str, Any] = {
+  'torch_dtype': torch.float16,
+} if use_ollin_vae else {
+  'variant': 'fp16',
+  'subfolder': 'vae',
   # decoder gets NaN result in float16.
-  # torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
-  torch_dtype=torch.float16,
+  'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+}
+
+vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+  'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else default_model_name,
   use_safetensors=True,
-  # variant='fp16',
-  # subfolder='vae',
+  **vae_kwargs,
 )
 # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
 # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
@@ -193,13 +203,13 @@ height_lt: int = height_px // vae_scale_factor
 # and crop(0,0) (i.e. a well-framed image) make sense.
 # TODO: should non-square images condition on orig=targ=(height_px, width_px),
 #       or should they use orig=targ=(1024, 1024)?
-original_size = Dimensions(height_px, width_px)
+original_size = Dimensions(height_px*4, width_px*4) if use_wdxl else Dimensions(height_px, width_px)
 target_size = Dimensions(height_px, width_px)
 crop_coords_top_left = Dimensions(0, 0)
 aesthetic_score = 6.
 negative_aesthetic_score = 2.5
 
-cfg_scale = 5.
+cfg_scale = 12. if use_wdxl else 5.
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
 # 3.4. Rescale Classifier-Free Guidance
@@ -207,7 +217,11 @@ cfg_rescale = 0.
 # cfg_rescale = 0.7
 
 force_zeros_for_empty_prompt = True
-uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
+
+if use_wdxl:
+  uncond_prompt: str = 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name'
+else:
+  uncond_prompt: Optional[str] = None if force_zeros_for_empty_prompt else ''
 
 keyframes: List[PromptType] = [
   CFGPrompts(
