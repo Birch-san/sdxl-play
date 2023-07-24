@@ -3,9 +3,7 @@ from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers.models.vae import DecoderOutput
 from diffusers.models.attention import Attention
 from easing_functions import CubicEaseInOut
-from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, BatchEncoding
-from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.clip.modeling_clip import CLIPTextModelOutput
+from transformers import CLIPPreTrainedModel, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 import torch
 from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, zeros, ones, stack
 from torch.nn.functional import pad
