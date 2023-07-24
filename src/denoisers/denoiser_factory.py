@@ -14,6 +14,7 @@ class DenoiserFactory(Generic[D], Protocol):
     delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
+    cfg_scale: float,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> D: ...
 

@@ -155,6 +155,7 @@ aesthetic_score = 6.
 negative_aesthetic_score = 2.5
 
 cfg_scale = 12. if use_wdxl else 5.
+refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
 # 3.4. Rescale Classifier-Free Guidance
@@ -268,6 +269,7 @@ if cfg_scale > 1:
     delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
+    cfg_scale: float,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> CFGDenoiser:
     return CFGDenoiser(
@@ -404,6 +406,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   base_denoiser: Denoiser = base_denoiser_factory(
     cross_attention_conds=base_embed.repeat_interleave(batch_size, 0),
     added_cond_kwargs=base_added_cond_kwargs,
+    cfg_scale=cfg_scale,
     # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
     # cross_attention_mask=base_embedding_mask.repeat(batch_size, 1),
   )
@@ -415,6 +418,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
     refiner_denoiser: Denoiser = refiner_denoiser_factory(
       cross_attention_conds=refiner_embed.repeat_interleave(batch_size, 0),
       added_cond_kwargs=refiner_added_cond_kwargs,
+      cfg_scale=refiner_cfg_scale,
       # TODO: check what mask is like. I assume Stability never trained on masked embeddings.
       # cross_attention_mask=refiner_embedding_mask.repeat(batch_size, 1),
     )
