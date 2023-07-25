@@ -202,7 +202,12 @@ refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 cfg_rescale = 0.
 # cfg_rescale = 0.7
 
-force_zeros_for_empty_prompt = True
+# apparently zero-uncond was just an inference experiment; it's not actually how SDXL was trained.
+# https://twitter.com/s_alt_acc/status/1683627077315227648
+# interestingly, diffusers default is to enable this for base UNet, disable for refiner.
+# it'd be a little fiddly in this script to make base and refiner separately configurable.
+# fortunately it sounds like the simpler way (use empty string, for both UNets) is the correct way.
+force_zeros_for_empty_prompt = False
 
 if use_wdxl:
   uncond_prompt: str = 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name'

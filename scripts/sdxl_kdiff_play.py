@@ -181,7 +181,12 @@ refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 cfg_rescale = 0.
 # cfg_rescale = 0.7
 
-force_zeros_for_empty_prompt = True
+# apparently zero-uncond was just an inference experiment; it's not actually how SDXL was trained.
+# https://twitter.com/s_alt_acc/status/1683627077315227648
+# interestingly, diffusers default is to enable this for base UNet, disable for refiner.
+# it'd be a little fiddly in this script to make base and refiner separately configurable.
+# fortunately it sounds like the simpler way (use empty string, for both UNets) is the correct way.
+force_zeros_for_empty_prompt = False
 
 if use_wdxl:
   uncond_prompt: str = 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name'
@@ -193,7 +198,7 @@ negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
 prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
 prompts: List[str] = [
-  *([] if negative_prompt is None else [negative_prompt]),
+  *([] if negative_prompt is None or cfg_scale == 1. else [negative_prompt]),
   prompt,
 ]
 
@@ -305,6 +310,8 @@ else:
     delegate: Denoiser,
     cross_attention_conds: FloatTensor,
     added_cond_kwargs: CondKwargs,
+    # unused param, used to satisfy factory interface
+    cfg_scale: float,
     cross_attention_mask: Optional[BoolTensor] = None,
   ) -> CFGDenoiser:
     return NoCFGDenoiser(
