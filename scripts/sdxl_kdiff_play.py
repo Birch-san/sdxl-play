@@ -181,12 +181,14 @@ refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 cfg_rescale = 0.
 # cfg_rescale = 0.7
 
-# apparently zero-uncond was just an inference experiment; it's not actually how SDXL was trained.
+# how was SDXL trained? on zero uncond, or empty string uncond? how about for the refiner?
 # https://twitter.com/s_alt_acc/status/1683627077315227648
-# interestingly, diffusers default is to enable this for base UNet, disable for refiner.
+# https://twitter.com/Birchlabs/status/1683949307450228741
+# diffusers default is to enable this for base UNet, disable for refiner.
 # it'd be a little fiddly in this script to make base and refiner separately configurable.
-# fortunately it sounds like the simpler way (use empty string, for both UNets) is the correct way.
-force_zeros_for_empty_prompt = False
+# fortunately we can afford to get it wrong for refiner; CFG doesn't do much below sigma 1.1
+# https://birchlabs.co.uk/machine-learning#when-to-skip-cfg-for-speedup
+force_zeros_for_empty_prompt = True
 
 if use_wdxl:
   uncond_prompt: str = 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name'
