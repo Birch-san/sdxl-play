@@ -406,7 +406,7 @@ q=1.
 u=100
 t_end=1.
 
-keyframes = [100, 101, 102, 100]
+keyframes = [100, 101, 102, 103, 104, 105, 106, 100]
 
 noises: Optional[FloatTensor] = None
 linsp: Optional[FloatTensor] = None
