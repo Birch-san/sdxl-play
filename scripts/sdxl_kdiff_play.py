@@ -37,6 +37,8 @@ from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
+from src.interpolation.kld_bridgeish import kld_bridgeish
+from src.interpolation.ornstein_uhlenbeck_bridge import ornstein_uhlenbeck_bridge
 
 logger: Logger = getLogger(__file__)
 
@@ -175,6 +177,7 @@ negative_aesthetic_score = 2.5
 
 cfg_scale = 12. if use_wdxl else 5.
 refiner_cfg_scale = 5. if use_wdxl else cfg_scale
+# cfg_scale = refiner_cfg_scale = 1.
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
 # 3.4. Rescale Classifier-Free Guidance
@@ -198,7 +201,11 @@ else:
 negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
 # prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+prompt: str = 'absolute power is a door into dreaming, by ross tran, oil on canvas'
+# prompt: str = 'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck'
+# prompt: str = 'pixiv, masterpiece, best quality, 1girl, aqua eyes, baseball cap, blonde hair, closed mouth, earrings, green background, hat, hoop earrings, jewelry, looking at viewer, shirt, short hair, simple background, solo, upper body, yellow shirt,'
+# prompt: str = 'beautiful, 1girl, flandre scarlet touhou, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen'
 prompts: List[str] = [
   *([] if negative_prompt is None or cfg_scale == 1. else [negative_prompt]),
   prompt,
@@ -249,6 +256,8 @@ for tokenizer_ix, (tokenized, tokenizer, text_encoder) in enumerate(zip(tokenize
 assert pooled_embed is not None
 base_embed: FloatTensor = cat(embeddings, dim=-1)
 base_embedding_mask: BoolTensor = cat(embedding_masks, dim=-1)
+# base_embed = torch.zeros_like(base_embed)
+# pooled_embed = torch.zeros_like(pooled_embed)
 if use_refiner:
   refiner_embed: FloatTensor = embeddings[1] # emb_vit_big_g
   refiner_embedding_mask: BoolTensor = embedding_masks[1] # mask_vit_big_g
@@ -375,7 +384,7 @@ if use_refiner:
 # denoising from a later sigma than sigma_max.
 start_sigma = sigmas[0]
 
-out_dir = 'out'
+out_dir = 'out_kinterp2'
 makedirs(out_dir, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
@@ -389,11 +398,40 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 2
+max_batch_size = 8
 
-start_seed = 42
+start_seed = 100
+end_seed = 101
 sample_count = 8
 seeds = range(start_seed, start_seed+sample_count)
+
+t_end=1.
+noises: FloatTensor = ornstein_uhlenbeck_bridge(
+  sample_count,
+  start=randn(
+    (
+      latents_shape.channels,
+      latents_shape.height,
+      latents_shape.width
+    ),
+    dtype=sampling_dtype,
+    device=generator.device,
+    generator=generator.manual_seed(start_seed),
+  ).to(device),
+  end=randn(
+    (
+      latents_shape.channels,
+      latents_shape.height,
+      latents_shape.width
+    ),
+    dtype=sampling_dtype,
+    device=generator.device,
+    generator=generator.manual_seed(end_seed),
+  ).to(device),
+  # t_end=t_end,
+  q=0.1,
+)
+linsp: FloatTensor = torch.linspace(0, t_end, sample_count - 1, device=device)
 
 if not swap_models:
   base_unet.to(device)
@@ -405,26 +443,14 @@ img_provenance: str = 'refined' if use_refiner else 'base'
 
 print(f'Generating {sample_count} images, in batches of {max_batch_size}')
 
-for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
-  batch_size: int = len(batch_seeds)
-  print(f'Generating a batch of {batch_size} images, seeds {batch_seeds}')
-  latents: FloatTensor = stack([
-    randn(
-      (
-        latents_shape.channels,
-        latents_shape.height,
-        latents_shape.width
-      ),
-      dtype=sampling_dtype,
-      device=generator.device,
-      generator=generator.manual_seed(seed),
-    ) for seed in batch_seeds
-  ]).to(device)
+for batch_ix, (latents, quotients) in enumerate(zip(noises.split(max_batch_size), linsp.split(max_batch_size))):
+  batch_size: int = latents.size(0)
+  print(f'Generating a batch of {batch_size} images, quotients {quotients}')
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
-    for sample_ix, seed in enumerate(batch_seeds)
+    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_s{start_seed}_q{quotient}'
+    for sample_ix, quotient in enumerate(quotients)
   ]
 
   base_added_cond_kwargs = CondKwargs(
