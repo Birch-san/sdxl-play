@@ -398,7 +398,7 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 8
+max_batch_size = 1
 
 start_seed = 100
 end_seed = 101
@@ -431,7 +431,7 @@ noises: FloatTensor = ornstein_uhlenbeck_bridge(
   # t_end=t_end,
   q=0.1,
 )
-linsp: FloatTensor = torch.linspace(0, t_end, sample_count - 1, device=device)
+linsp: FloatTensor = pad(torch.linspace(0, t_end, sample_count - 1, device=device), pad=(1, 0), mode='constant')
 
 if not swap_models:
   base_unet.to(device)
