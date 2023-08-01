@@ -40,6 +40,13 @@
       "justMyCode": false,
     },
     {
+      "name": "Python: SDXL k-diffusion noise interpolation",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.sdxl_kdiff_kinterp",
+      "justMyCode": false,
+    },
+    {
       "name": "Python: in-between test",
       "type": "python",
       "request": "launch",
