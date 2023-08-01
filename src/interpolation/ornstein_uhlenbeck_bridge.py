@@ -4,6 +4,8 @@ def ornstein_uhlenbeck_bridge(
   start: torch.FloatTensor,
   end: torch.FloatTensor,
   q=1.0,
+  # note: for some reason CPU Generator resulted in corrupted image
+  generator: torch.Generator = torch.Generator(device='cuda'),
 ):
   """
   Author: Katherine Crowson
@@ -20,7 +22,8 @@ def ornstein_uhlenbeck_bridge(
     fac = q * (1 - t)
     dx = q * (-x / torch.tanh(fac) + end / torch.sinh(fac))
     x = x + h * dx
-    x = x + torch.sqrt(2 * h) * torch.randn_like(x)
+    # randn_like didn't accept a Generator so I had to get a bit creative
+    x = x + torch.sqrt(2 * h) * torch.randn(x.size(), generator=generator, device=generator.device, dtype=x.dtype, layout=x.layout).to(x.device)
     xs.append(x)
   xs.append(end)
   return torch.stack(xs)

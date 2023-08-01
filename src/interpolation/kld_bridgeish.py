@@ -9,6 +9,8 @@ def kld_bridgeish(
   gamma=2.0,
   q=1.0,
   v=None,
+  # note: for some reason CPU Generator resulted in corrupted image
+  generator: torch.Generator = torch.Generator(device='cuda'),
 ) -> Optional[torch.FloatTensor]:
   """
   Author: Katherine Crowson
@@ -27,7 +29,8 @@ def kld_bridgeish(
     dv = -(gamma * v + u * grad)
     x = x + h * dx
     v = v + h * dv
-    v = v + torch.sqrt(2 * gamma * u * h) * torch.randn_like(v)
+    # randn_like didn't accept a Generator so I had to get a bit creative
+    v = v + torch.sqrt(2 * gamma * u * h) * torch.randn(v.size(), generator=generator, device=generator.device, dtype=v.dtype, layout=v.layout).to(v.device)
     xs.append(x)
   xs.append(end)
   return torch.stack(xs)
