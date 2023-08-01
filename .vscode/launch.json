@@ -26,6 +26,13 @@
       "justMyCode": false,
     },
     {
+      "name": "Python: WDXL Diffusers Play",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.wdxl_diffusers_play",
+      "justMyCode": false,
+    },
+    {
       "name": "Python: SDXL k-diffusion Play",
       "type": "python",
       "request": "launch",
