@@ -449,7 +449,7 @@ for batch_ix, (latents, quotients) in enumerate(zip(noises.split(max_batch_size)
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_s{start_seed}_q{quotient}'
+    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_s{start_seed}_u{u}_q{q}_t{quotient}'
     for sample_ix, quotient in enumerate(quotients)
   ]
 

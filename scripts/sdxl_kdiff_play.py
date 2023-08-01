@@ -423,7 +423,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
+    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
     for sample_ix, seed in enumerate(batch_seeds)
   ]
 
