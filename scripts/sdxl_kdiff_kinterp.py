@@ -398,7 +398,7 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 1
+max_batch_size = 8
 
 start_seed = 100
 end_seed = 101
