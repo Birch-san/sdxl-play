@@ -17,8 +17,8 @@ import fnmatch
 from pathlib import Path
 from PIL import Image
 from functools import partial
+from itertools import pairwise
 
-from src.iteration.batched import batched
 from src.denoisers.denoiser_proto import Denoiser
 from src.denoisers.denoiser_factory import DenoiserFactory, DenoiserFactoryFactory
 from src.denoisers.dispatch_denoiser import DispatchDenoiser, IdentifiedDenoiser
@@ -384,7 +384,7 @@ if use_refiner:
 # denoising from a later sigma than sigma_max.
 start_sigma = sigmas[0]
 
-out_dir = 'out_kinterp2'
+out_dir = 'out_kinterp4'
 makedirs(out_dir, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
@@ -400,38 +400,60 @@ generator = Generator(device='cpu')
 
 max_batch_size = 8
 
-start_seed = 100
-end_seed = 101
-sample_count = 8
-seeds = range(start_seed, start_seed+sample_count)
-
+sampling_steps_per_transition = 151
+subsampling = 10
+q=1.
+u=100
 t_end=1.
-noises: FloatTensor = ornstein_uhlenbeck_bridge(
-  sample_count,
-  start=randn(
-    (
-      latents_shape.channels,
-      latents_shape.height,
-      latents_shape.width
-    ),
-    dtype=sampling_dtype,
-    device=generator.device,
-    generator=generator.manual_seed(start_seed),
-  ).to(device),
-  end=randn(
-    (
-      latents_shape.channels,
-      latents_shape.height,
-      latents_shape.width
-    ),
-    dtype=sampling_dtype,
-    device=generator.device,
-    generator=generator.manual_seed(end_seed),
-  ).to(device),
-  # t_end=t_end,
-  q=0.1,
-)
-linsp: FloatTensor = pad(torch.linspace(0, t_end, sample_count - 1, device=device), pad=(1, 0), mode='constant')
+
+keyframes = [100, 101, 102, 100]
+
+noises: Optional[FloatTensor] = None
+linsp: Optional[FloatTensor] = None
+for start_seed, end_seed in pairwise(keyframes):
+  new_noises: FloatTensor = kld_bridgeish(
+    sampling_steps_per_transition,
+    start=randn(
+      (
+        latents_shape.channels,
+        latents_shape.height,
+        latents_shape.width
+      ),
+      dtype=sampling_dtype,
+      device=generator.device,
+      generator=generator.manual_seed(start_seed),
+    ).to(device),
+    end=randn(
+      (
+        latents_shape.channels,
+        latents_shape.height,
+        latents_shape.width
+      ),
+      dtype=sampling_dtype,
+      device=generator.device,
+      generator=generator.manual_seed(end_seed),
+    ).to(device),
+    t_end=t_end,
+    q=q,
+    u=u,
+    generator=Generator(device=device).manual_seed(start_seed),
+  )
+  new_linsp: FloatTensor = pad(torch.linspace(0, t_end, sampling_steps_per_transition - 1, device=device), pad=(1, 0), mode='constant')
+  new_noises = new_noises[::subsampling]
+  new_linsp = new_linsp[::subsampling]
+  # sorry, not the prettiest way to accumulate
+  if noises is None:
+    noises = new_noises
+    linsp = new_linsp
+  else:
+    noises = cat([
+      noises[:-1],
+      new_noises,
+    ])
+    linsp = cat([
+      linsp[:-1],
+      new_linsp,
+    ])
 
 if not swap_models:
   base_unet.to(device)
@@ -441,7 +463,7 @@ if not swap_models:
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
-print(f'Generating {sample_count} images, in batches of {max_batch_size}')
+print(f'Generating {noises.size(0)} images, in batches of {max_batch_size}')
 
 for batch_ix, (latents, quotients) in enumerate(zip(noises.split(max_batch_size), linsp.split(max_batch_size))):
   batch_size: int = latents.size(0)
