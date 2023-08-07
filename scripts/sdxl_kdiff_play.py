@@ -174,6 +174,7 @@ aesthetic_score = 6.
 negative_aesthetic_score = 2.5
 
 cfg_scale = 12. if use_wdxl else 5.
+cfg_until: Optional[float] = None # 1.1
 refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
@@ -290,38 +291,70 @@ unets_k_wrapped: List[EPSDenoiser] = [
 base_unet_k_wrapped: EPSDenoiser = unets_k_wrapped[0]
 refiner_unet_k_wrapped: Optional[EPSDenoiser] = unets_k_wrapped[1] if use_refiner else None
 
+def make_cfg_denoiser(
+  delegate: Denoiser,
+  cross_attention_conds: FloatTensor,
+  added_cond_kwargs: CondKwargs,
+  cfg_scale: float,
+  cross_attention_mask: Optional[BoolTensor] = None,
+) -> CFGDenoiser:
+  return CFGDenoiser(
+    denoiser=delegate,
+    cross_attention_conds=cross_attention_conds,
+    added_cond_kwargs=added_cond_kwargs,
+    cfg_scale=cfg_scale,
+    guidance_rescale=cfg_rescale,
+    cross_attention_mask=cross_attention_mask,
+  )
+def make_no_cfg_denoiser(
+  delegate: Denoiser,
+  cross_attention_conds: FloatTensor,
+  added_cond_kwargs: CondKwargs,
+  # unused param, used to satisfy factory interface
+  cfg_scale: float,
+  cross_attention_mask: Optional[BoolTensor] = None,
+) -> CFGDenoiser:
+  return NoCFGDenoiser(
+    denoiser=delegate,
+    cross_attention_conds=cross_attention_conds,
+    added_cond_kwargs=added_cond_kwargs,
+    cross_attention_mask=cross_attention_mask,
+  )
 if cfg_scale > 1:
-  def make_cfg_denoiser(
-    delegate: Denoiser,
-    cross_attention_conds: FloatTensor,
-    added_cond_kwargs: CondKwargs,
-    cfg_scale: float,
-    cross_attention_mask: Optional[BoolTensor] = None,
-  ) -> CFGDenoiser:
-    return CFGDenoiser(
-      denoiser=delegate,
-      cross_attention_conds=cross_attention_conds,
-      added_cond_kwargs=added_cond_kwargs,
-      cfg_scale=cfg_scale,
-      guidance_rescale=cfg_rescale,
-      cross_attention_mask=cross_attention_mask,
-    )
-  denoiser_factory_factory: DenoiserFactoryFactory[CFGDenoiser] = lambda delegate: partial(make_cfg_denoiser, delegate)
+  if cfg_until is None:
+    denoiser_factory_factory: DenoiserFactoryFactory[CFGDenoiser] = lambda delegate: partial(make_cfg_denoiser, delegate)
+  else:
+    def make_cfg_until_denoiser(
+      delegate: Denoiser,
+      cross_attention_conds: FloatTensor,
+      added_cond_kwargs: CondKwargs,
+      cfg_scale: float,
+      cross_attention_mask: Optional[BoolTensor] = None,
+    ) -> DispatchDenoiser:
+      cfg_denoiser = CFGDenoiser(
+        denoiser=delegate,
+        cross_attention_conds=cross_attention_conds,
+        added_cond_kwargs=added_cond_kwargs,
+        cfg_scale=cfg_scale,
+        guidance_rescale=cfg_rescale,
+        cross_attention_mask=cross_attention_mask,
+      )
+      no_cfg_denoiser = NoCFGDenoiser(
+        denoiser=delegate,
+        cross_attention_conds=cross_attention_conds.chunk(2)[1],
+        added_cond_kwargs=CondKwargs(
+          text_embeds=added_cond_kwargs['text_embeds'].chunk(2)[1],
+          time_ids=added_cond_kwargs['time_ids'].chunk(2)[1],
+        ),
+        cross_attention_mask=None if cross_attention_mask is None else cross_attention_mask.chunk(2)[1],
+      )
+      cfg_id = IdentifiedDenoiser('cfg', cfg_denoiser)
+      nocfg_id = IdentifiedDenoiser('nocfg', no_cfg_denoiser)
+      def pick_delegate(sigma: float) -> IdentifiedDenoiser:
+        return cfg_id if sigma > cfg_until else nocfg_id
+      return DispatchDenoiser(pick_delegate=pick_delegate)
+    denoiser_factory_factory: DenoiserFactoryFactory[DispatchDenoiser] = lambda delegate: partial(make_cfg_until_denoiser, delegate)
 else:
-  def make_no_cfg_denoiser(
-    delegate: Denoiser,
-    cross_attention_conds: FloatTensor,
-    added_cond_kwargs: CondKwargs,
-    # unused param, used to satisfy factory interface
-    cfg_scale: float,
-    cross_attention_mask: Optional[BoolTensor] = None,
-  ) -> CFGDenoiser:
-    return NoCFGDenoiser(
-      denoiser=delegate,
-      cross_attention_conds=cross_attention_conds,
-      added_cond_kwargs=added_cond_kwargs,
-      cross_attention_mask=cross_attention_mask,
-    )
   denoiser_factory_factory: DenoiserFactoryFactory[NoCFGDenoiser] = lambda delegate: partial(make_no_cfg_denoiser, delegate)
 
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
