@@ -37,6 +37,7 @@ from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
+from time import perf_counter
 
 logger: Logger = getLogger(__file__)
 
@@ -95,6 +96,8 @@ compile = False
 if compile:
   for unet in unets:
     torch.compile(unet, mode='reduce-overhead', fullgraph=True)
+
+profile = False
 
 tokenizers: List[CLIPTokenizer] = [CLIPTokenizer.from_pretrained(
   default_model_name,
@@ -515,6 +518,8 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   #   seed=seeds[0],
   # )
 
+  tic: float = perf_counter()
+
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
     denoised_latents: FloatTensor = sample_dpmpp_2m(
       denoiser,
@@ -523,6 +528,12 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       # callback=callback,
     ).to(vae.dtype)
+
+  if profile:
+    batch_secs: float = perf_counter() - tic
+    per_sample_secs: float = batch_secs/batch_size
+    torch.cuda.synchronize()
+    print(f"batch-of-{batch_size} took {batch_secs:.2f}s with cfg_until={(0 if cfg_until is None else cfg_until):.2f} and use_refiner={use_refiner}. that's {per_sample_secs:.2f}s/sample. Measurement includes UNet(s) only.")
 
   if swap_models:
     refiner_unet.cpu()
