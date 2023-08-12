@@ -212,7 +212,6 @@ def sample_refined_exp_s(
     eps: FloatTensor = noise_sampler(x)
     sigma_hat = sigma * (1 + ita)
     x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-    lam: float = x_hat.log().neg()
-    x_next: FloatTensor = model(x_hat, lam)
+    x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
     x = x_next
   return x
