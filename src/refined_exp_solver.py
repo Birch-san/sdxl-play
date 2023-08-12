@@ -2,7 +2,7 @@ import torch
 from torch import no_grad, FloatTensor
 from tqdm import tqdm
 from itertools import pairwise
-from typing import Protocol, Optional, Dict, Any, TypedDict, NamedTuple
+from typing import Protocol, Optional, Dict, Any, TypedDict, NamedTuple, Union, List
 import math
 
 class DenoiserModel(Protocol):
@@ -37,32 +37,37 @@ def gamma(
 
 def incomplete_gamma(
   s: int,
-  x: float
+  x: float,
+  gamma_s: Optional[int] = None
 ) -> float:
   """
-  https://en.wikipedia.org/wiki/Incomplete_gamma_function
+  https://en.wikipedia.org/wiki/Incomplete_gamma_function#Special_values
   if s is a positive integer,
-  Γ(s, x) = (j-1)!*∑{k=0..s-1}(x^k/k!)
+  Γ(s, x) = (s-1)!*∑{k=0..s-1}(x^k/k!)
   """
-  incomp_gamma_sum: float = 0
+  if gamma_s is None:
+    gamma_s = gamma(s)
+
+  sum_: float = 0
   # {k=0..s-1} inclusive
   for k in range(s):
     numerator: float = x**k
     denom: int = math.factorial(k)
-    incom_gamma: float = numerator/denom
-    incomp_gamma_sum += incom_gamma
-  return incomp_gamma_sum
+    quotient: float = numerator/denom
+    sum_ += quotient
+  incomplete_gamma_: float = sum_ * math.exp(-x) * gamma_s
+  return incomplete_gamma_
 
 # by Katherine Crowson
-def phi_1(neg_h: float):
+def phi_1(neg_h: FloatTensor):
   return torch.nan_to_num(torch.expm1(neg_h) / neg_h, nan=1.0)
 
 # by Katherine Crowson
-def phi_2(neg_h: float):
+def phi_2(neg_h: FloatTensor):
   return torch.nan_to_num((torch.expm1(neg_h) - neg_h) / neg_h**2, nan=0.5)
 
 # by Katherine Crowson
-def phi_3(neg_h: float):
+def phi_3(neg_h: FloatTensor):
   return torch.nan_to_num((torch.expm1(neg_h) - neg_h - neg_h**2 / 2) / neg_h**3, nan=1 / 6)
 
 def phi(
@@ -70,7 +75,7 @@ def phi(
   j: int,
 ):
   """
-  DEPRECATED: prefer Kat's phi_1, phi_2, phi_3 for now
+  For j={1,2,3}: you could alternatively use Kat's phi_1, phi_2, phi_3 which perform fewer steps
 
   Lemma 1
   https://arxiv.org/abs/2308.02157
@@ -89,7 +94,7 @@ def phi(
   """
   assert j > 0
   gamma_: float = gamma(j)
-  incomp_gamma_: float = incomplete_gamma(j, neg_h)
+  incomp_gamma_: float = incomplete_gamma(j, neg_h, gamma_s=gamma_)
 
   phi_: float = math.exp(neg_h) * neg_h**-j * (1-incomp_gamma_/gamma_)
 
@@ -112,12 +117,13 @@ def de_second_order(
        = c2ϕ1(-c2*h)
   b1 = ϕ1 - ϕ2/c2
   """
-  # a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
-  # phi1: float = phi(j=1, neg_h=-h)
-  # phi2: float = phi(j=2, neg_h=-h)
-  a2_1: float = c2 * phi_1(-c2*h)
-  phi1: float = phi_1(-h)
-  phi2: float = phi_2(-h)
+  a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
+  phi1: float = phi(j=1, neg_h=-h)
+  phi2: float = phi(j=2, neg_h=-h)
+  # Kat's implementations work too and are faster
+  # a2_1: float = c2 * phi_1(-c2*h)
+  # phi1: float = phi_1(-h)
+  # phi2: float = phi_2(-h)
   phi2_c2: float = phi2/c2
   b1: float = phi1 - phi2_c2
   b2: float = phi2_c2
@@ -128,7 +134,7 @@ def de_second_order(
   )  
 
 def refined_exp_sosu_step(
-  model: FloatTensor,
+  model: DenoiserModel,
   x: FloatTensor,
   sigma: FloatTensor,
   sigma_next: FloatTensor,
@@ -143,7 +149,7 @@ def refined_exp_sosu_step(
   c2 = 0.5
   a2_1, b1, b2 = de_second_order(h=h, c2=c2)
   
-  denoised: FloatTensor = model(x, sigma, **extra_args)
+  denoised: FloatTensor = model(x, sigma.to(x.device), **extra_args)
 
   c2_h: float = c2*h
 
@@ -151,7 +157,7 @@ def refined_exp_sosu_step(
   lam_2: float = lam + c2_h
   sigma_2: float = lam_2.neg().exp()
 
-  denoised2: FloatTensor = model(x_2, sigma_2, **extra_args)
+  denoised2: FloatTensor = model(x_2, sigma_2.to(x.device), **extra_args)
 
   x_next: FloatTensor = math.exp(-h)*x + h*(b1*denoised + b2*denoised2)
 
@@ -168,7 +174,7 @@ def refined_exp_sosu_step(
 def sample_refined_exp_s(
   model: FloatTensor,
   x: FloatTensor,
-  sigmas: FloatTensor,
+  sigmas: Union[FloatTensor, List[float]],
   denoise_to_zero: bool = False,
   extra_args: Dict[str, Any] = {},
   callback: Optional[RefinedExpCallback] = None,
@@ -183,6 +189,9 @@ def sample_refined_exp_s(
   https://arxiv.org/abs/2308.02157
   """
   assert sigmas[-1] == 0
+  # we're gonna be doing a lot of single-element arithmetic on sigmas, so don't wanna be transferring those to/from GPU so often
+  if torch.is_tensor(sigmas):
+    sigmas.cpu()
   for i, (sigma, sigma_next) in tqdm(enumerate(pairwise(sigmas[:-1])), disable=disable, total=len(sigmas)-2):
     eps: FloatTensor = noise_sampler(x)
     sigma_hat = sigma * (1 + ita)
