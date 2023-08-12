@@ -38,6 +38,8 @@ from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
 from src.refined_exp_solver import sample_refined_exp_s
+from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
+from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
 from time import perf_counter
 
 logger: Logger = getLogger(__file__)
@@ -152,6 +154,12 @@ vae.enable_slicing()
 del vae.encoder
 vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
 # vae_scale_factor=8
+
+# TODO: code-share with how we decode images in the non-intermediates case
+latents_to_bchw: LatentsToBCHW = make_latents_to_bchw(vae)
+latents_to_pils: LatentsToPils = make_latents_to_pils(latents_to_bchw)
+make_log_intermediates: LogIntermediatesFactory = make_log_intermediates_factory(latents_to_pils)
+log_intermediates_enabled = False
 
 def round_down(num: int, divisor: int) -> int:
   return num - (num % divisor)
@@ -419,7 +427,9 @@ if use_refiner:
 start_sigma = sigmas[0]
 
 out_dir = 'out'
-makedirs(out_dir, exist_ok=True)
+intermediates_path=f'{out_dir}/intermediates'
+for path_ in [out_dir, intermediates_path]:
+  makedirs(path_, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
 get_out_ix: Callable[[str], int] = lambda stem: int(stem.split('_', maxsplit=1)[0])
@@ -469,6 +479,14 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
     f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
     for sample_ix, seed in enumerate(batch_seeds)
   ]
+
+  if log_intermediates_enabled:
+    intermediates_paths: List[str] = [f'{intermediates_path}/{stem}' for stem in out_stems]
+    for intermediates_path in intermediates_paths:
+      makedirs(intermediates_path, exist_ok=True)
+    callback: LogIntermediates = make_log_intermediates(intermediates_paths)
+  else:
+    callback = None
 
   base_added_cond_kwargs = CondKwargs(
     text_embeds=pooled_embed.repeat_interleave(batch_size, 0),
@@ -534,7 +552,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
       latents,
       sigmas,
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
-      # callback=callback,
+      callback=callback,
     ).to(vae.dtype)
 
   if profile:
