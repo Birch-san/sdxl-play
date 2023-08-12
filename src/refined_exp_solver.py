@@ -193,7 +193,7 @@ def sample_refined_exp_s(
   noise_sampler: NoiseSampler = torch.randn_like,
   # True = use the simpler phi expressions Kat computed for j={1,2,3}
   # False = use the general phi expression I computed. both similar. not sure which would have more numerical error.
-  simple_phi_calc = False,
+  simple_phi_calc = True,
 ):
   """
   Refined Exponential Solver (S).
