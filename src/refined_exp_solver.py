@@ -156,7 +156,7 @@ def refined_exp_sosu_step(
   c2 = 0.5
   a2_1, b1, b2 = de_second_order(h=h, c2=c2, simple_phi_calc=simple_phi_calc)
   
-  denoised: FloatTensor = model(x, sigma.to(x.device), **extra_args)
+  denoised: FloatTensor = model(x, sigma.unsqueeze(0).to(x.device), **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -166,7 +166,7 @@ def refined_exp_sosu_step(
   lam_2: float = lam + c2_h
   sigma_2: float = lam_2.neg().exp()
 
-  denoised2: FloatTensor = model(x_2, sigma_2.to(x.device), **extra_args)
+  denoised2: FloatTensor = model(x_2, sigma_2.unsqueeze(0).to(x.device), **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -233,7 +233,7 @@ def sample_refined_exp_s(
       eps: FloatTensor = noise_sampler(x)
       sigma_hat = sigma * (1 + ita)
       x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-      x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
+      x_next: FloatTensor = model(x_hat, sigma.unsqueeze(0).to(x_hat.device))
       pbar.update()
       x = x_next
   return x
