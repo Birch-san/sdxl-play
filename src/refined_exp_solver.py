@@ -143,14 +143,15 @@ def refined_exp_sosu_step(
   c2 = 0.5
   a2_1, b1, b2 = de_second_order(h=h, c2=c2)
   
-  denoised: FloatTensor = model(x, lam, **extra_args)
+  denoised: FloatTensor = model(x, sigma, **extra_args)
 
   c2_h: float = c2*h
 
   x_2: FloatTensor = math.exp(-c2_h)*x + a2_1*h*denoised
   lam_2: float = lam + c2_h
+  sigma_2: float = lam_2.neg().exp()
 
-  denoised2: FloatTensor = model(x_2, lam_2, **extra_args)
+  denoised2: FloatTensor = model(x_2, sigma_2, **extra_args)
 
   x_next: FloatTensor = math.exp(-h)*x + h*(b1*denoised + b2*denoised2)
 
