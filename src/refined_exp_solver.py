@@ -21,9 +21,9 @@ class NoiseSampler(Protocol):
   def __call__(self, x: FloatTensor) -> FloatTensor: ...
 
 class StepOutput(NamedTuple):
+  x_next: FloatTensor
   denoised: FloatTensor
   denoised2: FloatTensor
-  x_next: FloatTensor
 
 def gamma(
   n: int,
@@ -53,11 +53,25 @@ def incomplete_gamma(
     incomp_gamma_sum += incom_gamma
   return incomp_gamma_sum
 
+# by Katherine Crowson
+def phi_1(neg_h: float):
+  return torch.nan_to_num(torch.expm1(neg_h) / neg_h, nan=1.0)
+
+# by Katherine Crowson
+def phi_2(neg_h: float):
+  return torch.nan_to_num((torch.expm1(neg_h) - neg_h) / neg_h**2, nan=0.5)
+
+# by Katherine Crowson
+def phi_3(neg_h: float):
+  return torch.nan_to_num((torch.expm1(neg_h) - neg_h - neg_h**2 / 2) / neg_h**3, nan=1 / 6)
+
 def phi(
   neg_h: float,
   j: int,
 ):
   """
+  DEPRECATED: prefer Kat's phi_1, phi_2, phi_3 for now
+
   Lemma 1
   https://arxiv.org/abs/2308.02157
   ϕj(-h) = 1/h^j*∫{0..h}(e^(τ-h)*(τ^(j-1))/((j-1)!)dτ)
@@ -98,9 +112,12 @@ def de_second_order(
        = c2ϕ1(-c2*h)
   b1 = ϕ1 - ϕ2/c2
   """
-  a2_1: float = c2 * phi(j=1, neg_h=c2*h)
-  phi1: float = phi(j=1, neg_h=-h)
-  phi2: float = phi(j=2, neg_h=-h)
+  # a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
+  # phi1: float = phi(j=1, neg_h=-h)
+  # phi2: float = phi(j=2, neg_h=-h)
+  a2_1: float = c2 * phi_1(-c2*h)
+  phi1: float = phi_1(-h)
+  phi2: float = phi_2(-h)
   phi2_c2: float = phi2/c2
   b1: float = phi1 - phi2_c2
   b2: float = phi2_c2
@@ -136,6 +153,8 @@ def refined_exp_sosu_step(
   denoised2: FloatTensor = model(x_2, lam_2, **extra_args)
 
   x_next: FloatTensor = math.exp(-h)*x + h*(b1*denoised + b2*denoised2)
+
+  assert sum((denoised.isnan().any().item(), denoised.isinf().any().item(), denoised2.isnan().any().item(), denoised2.isinf().any().item(), x_next.isnan().any().item(), x_next.isinf().any().item())) == 0
   
   return StepOutput(
     x_next=x_next,
@@ -149,6 +168,7 @@ def sample_refined_exp_s(
   model: FloatTensor,
   x: FloatTensor,
   sigmas: FloatTensor,
+  denoise_to_zero: bool = False,
   extra_args: Dict[str, Any] = {},
   callback: Optional[RefinedExpCallback] = None,
   disable: Optional[bool] = None,
@@ -161,7 +181,8 @@ def sample_refined_exp_s(
   Algorithm 2 "RES Single-Step Sampler"
   https://arxiv.org/abs/2308.02157
   """
-  for i, (sigma, sigma_next) in tqdm(enumerate(pairwise(sigmas)), disable=disable, total=len(sigmas)-1):
+  assert sigmas[-1] == 0
+  for i, (sigma, sigma_next) in tqdm(enumerate(pairwise(sigmas[:-1])), disable=disable, total=len(sigmas)-2):
     eps: FloatTensor = noise_sampler(x)
     sigma_hat = sigma * (1 + ita)
     x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
@@ -176,5 +197,12 @@ def sample_refined_exp_s(
         denoised2=denoised2,
       )
       callback(payload)
+    x = x_next
+  if denoise_to_zero:
+    eps: FloatTensor = noise_sampler(x)
+    sigma_hat = sigma * (1 + ita)
+    x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
+    lam: float = x_hat.log().neg()
+    x_next: FloatTensor = model(x_hat, lam)
     x = x_next
   return x
