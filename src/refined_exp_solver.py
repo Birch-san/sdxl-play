@@ -175,7 +175,7 @@ def sample_refined_exp_s(
   model: FloatTensor,
   x: FloatTensor,
   sigmas: Union[FloatTensor, List[float]],
-  denoise_to_zero: bool = False,
+  denoise_to_zero: bool = True,
   extra_args: Dict[str, Any] = {},
   callback: Optional[RefinedExpCallback] = None,
   disable: Optional[bool] = None,
