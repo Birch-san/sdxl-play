@@ -107,7 +107,8 @@ class RESDECoeffsSecondOrder(NamedTuple):
 
 def de_second_order(
   h: float,
-  c2: float
+  c2: float,
+  simple_phi_calc = False,
 ) -> RESDECoeffsSecondOrder:
   """
   Table 3
@@ -117,13 +118,17 @@ def de_second_order(
        = c2ϕ1(-c2*h)
   b1 = ϕ1 - ϕ2/c2
   """
-  a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
-  phi1: float = phi(j=1, neg_h=-h)
-  phi2: float = phi(j=2, neg_h=-h)
-  # Kat's implementations work too and are faster
-  # a2_1: float = c2 * phi_1(-c2*h)
-  # phi1: float = phi_1(-h)
-  # phi2: float = phi_2(-h)
+  if simple_phi_calc:
+    # Kat computed simpler expressions for phi for cases j={1,2,3}
+    a2_1: float = c2 * phi_1(-c2*h)
+    phi1: float = phi_1(-h)
+    phi2: float = phi_2(-h)
+  else:
+    # I computed general solution instead.
+    # they're close, but there are slight differences. not sure which would be more prone to numerical error.
+    a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
+    phi1: float = phi(j=1, neg_h=-h)
+    phi2: float = phi(j=2, neg_h=-h)
   phi2_c2: float = phi2/c2
   b1: float = phi1 - phi2_c2
   b2: float = phi2_c2
@@ -139,6 +144,8 @@ def refined_exp_sosu_step(
   sigma: FloatTensor,
   sigma_next: FloatTensor,
   extra_args: Dict[str, Any] = {},
+  pbar: Optional[tqdm] = None,
+  simple_phi_calc = False,
 ) -> StepOutput:
   """
   Algorithm 1 "RES Second order Single Update Step with c2"
@@ -147,9 +154,11 @@ def refined_exp_sosu_step(
   lam_next, lam = (s.log().neg() for s in (sigma_next, sigma))
   h: float = lam_next - lam
   c2 = 0.5
-  a2_1, b1, b2 = de_second_order(h=h, c2=c2)
+  a2_1, b1, b2 = de_second_order(h=h, c2=c2, simple_phi_calc=simple_phi_calc)
   
   denoised: FloatTensor = model(x, sigma.to(x.device), **extra_args)
+  if pbar is not None:
+    pbar.update(0.5)
 
   c2_h: float = c2*h
 
@@ -158,10 +167,10 @@ def refined_exp_sosu_step(
   sigma_2: float = lam_2.neg().exp()
 
   denoised2: FloatTensor = model(x_2, sigma_2.to(x.device), **extra_args)
+  if pbar is not None:
+    pbar.update(0.5)
 
   x_next: FloatTensor = math.exp(-h)*x + h*(b1*denoised + b2*denoised2)
-
-  assert sum((denoised.isnan().any().item(), denoised.isinf().any().item(), denoised2.isnan().any().item(), denoised2.isinf().any().item(), x_next.isnan().any().item(), x_next.isinf().any().item())) == 0
   
   return StepOutput(
     x_next=x_next,
@@ -182,6 +191,9 @@ def sample_refined_exp_s(
   # degree of stochasticity, η, from 0 to len(sigmas)
   ita = 0.,
   noise_sampler: NoiseSampler = torch.randn_like,
+  # True = use the simpler phi expressions Kat computed for j={1,2,3}
+  # False = use the general phi expression I computed. both similar. not sure which would have more numerical error.
+  simple_phi_calc = False,
 ):
   """
   Refined Exponential Solver (S).
@@ -192,26 +204,36 @@ def sample_refined_exp_s(
   # we're gonna be doing a lot of single-element arithmetic on sigmas, so don't wanna be transferring those to/from GPU so often
   if torch.is_tensor(sigmas):
     sigmas.cpu()
-  for i, (sigma, sigma_next) in tqdm(enumerate(pairwise(sigmas[:-1])), disable=disable, total=len(sigmas)-2):
-    eps: FloatTensor = noise_sampler(x)
-    sigma_hat = sigma * (1 + ita)
-    x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-    x_next, denoised, denoised2 = refined_exp_sosu_step(model, x_hat, sigma_hat, sigma_next)
-    if callback is not None:
-      payload = RefinedExpCallbackPayload(
-        x=x,
-        i=i,
-        sigma=sigma,
-        sigma_hat=sigma_hat,
-        denoised=denoised,
-        denoised2=denoised2,
+  with tqdm(disable=disable, total=len(sigmas)-(1 if denoise_to_zero else 2)) as pbar:
+    for i, (sigma, sigma_next) in enumerate(pairwise(sigmas[:-1])):
+      eps: FloatTensor = noise_sampler(x)
+      sigma_hat = sigma * (1 + ita)
+      x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
+      x_next, denoised, denoised2 = refined_exp_sosu_step(
+        model,
+        x_hat,
+        sigma_hat,
+        sigma_next,
+        extra_args=extra_args,
+        pbar=pbar,
+        simple_phi_calc=simple_phi_calc,
       )
-      callback(payload)
-    x = x_next
-  if denoise_to_zero:
-    eps: FloatTensor = noise_sampler(x)
-    sigma_hat = sigma * (1 + ita)
-    x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-    x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
-    x = x_next
+      if callback is not None:
+        payload = RefinedExpCallbackPayload(
+          x=x,
+          i=i,
+          sigma=sigma,
+          sigma_hat=sigma_hat,
+          denoised=denoised,
+          denoised2=denoised2,
+        )
+        callback(payload)
+      x = x_next
+    if denoise_to_zero:
+      eps: FloatTensor = noise_sampler(x)
+      sigma_hat = sigma * (1 + ita)
+      x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
+      x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
+      pbar.update()
+      x = x_next
   return x
