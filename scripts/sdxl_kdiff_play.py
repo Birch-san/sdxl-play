@@ -10,7 +10,7 @@ from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable, Dict, Any
 from logging import getLogger, Logger
-from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
+from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
 from os import makedirs, listdir
 from os.path import join
 import fnmatch
@@ -37,6 +37,7 @@ from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
+from src.refined_exp_solver import sample_refined_exp_s
 from time import perf_counter
 
 logger: Logger = getLogger(__file__)
@@ -363,21 +364,27 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
-schedule: KarrasScheduleParams = get_template_schedule(
-  schedule_template,
-  model_sigma_min=base_unet_k_wrapped.sigma_min,
-  model_sigma_max=base_unet_k_wrapped.sigma_max,
-  device=base_unet_k_wrapped.sigmas.device,
-  dtype=base_unet_k_wrapped.sigmas.dtype,
-)
+# schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+# schedule: KarrasScheduleParams = get_template_schedule(
+#   schedule_template,
+#   model_sigma_min=base_unet_k_wrapped.sigma_min,
+#   model_sigma_max=base_unet_k_wrapped.sigma_max,
+#   device=base_unet_k_wrapped.sigmas.device,
+#   dtype=base_unet_k_wrapped.sigmas.dtype,
+# )
 
-steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
-sigmas: FloatTensor = get_sigmas_karras(
-  n=steps,
-  sigma_max=sigma_max.cpu(),
-  sigma_min=sigma_min.cpu(),
-  rho=rho,
+# steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
+# sigmas: FloatTensor = get_sigmas_karras(
+#   n=steps,
+#   sigma_max=sigma_max.cpu(),
+#   sigma_min=sigma_min.cpu(),
+#   rho=rho,
+#   device=device,
+# ).to(sampling_dtype)
+sigmas: FloatTensor = get_sigmas_exponential(
+  n=25,
+  sigma_min=base_unet_k_wrapped.sigma_min,
+  sigma_max=base_unet_k_wrapped.sigma_max,
   device=device,
 ).to(sampling_dtype)
 
@@ -521,7 +528,8 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   tic: float = perf_counter()
 
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
-    denoised_latents: FloatTensor = sample_dpmpp_2m(
+    # denoised_latents: FloatTensor = sample_dpmpp_2m(
+    denoised_latents: FloatTensor = sample_refined_exp_s(
       denoiser,
       latents,
       sigmas,
