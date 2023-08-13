@@ -17,6 +17,7 @@ import fnmatch
 from pathlib import Path
 from PIL import Image
 from functools import partial
+from time import perf_counter
 
 from src.iteration.batched import batched
 from src.denoisers.denoiser_proto import Denoiser
@@ -40,7 +41,6 @@ from src.attn.flash_attn_processor import FlashAttnProcessor
 from src.refined_exp_solver import sample_refined_exp_s
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
-from time import perf_counter
 
 logger: Logger = getLogger(__file__)
 
