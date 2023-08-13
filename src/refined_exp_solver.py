@@ -25,7 +25,7 @@ class StepOutput(NamedTuple):
   denoised: FloatTensor
   denoised2: FloatTensor
 
-def gamma(
+def _gamma(
   n: int,
 ) -> int:
   """
@@ -35,7 +35,7 @@ def gamma(
   """
   return math.factorial(n-1)
 
-def incomplete_gamma(
+def _incomplete_gamma(
   s: int,
   x: float,
   gamma_s: Optional[int] = None
@@ -46,7 +46,7 @@ def incomplete_gamma(
   Γ(s, x) = (s-1)!*∑{k=0..s-1}(x^k/k!)
   """
   if gamma_s is None:
-    gamma_s = gamma(s)
+    gamma_s = _gamma(s)
 
   sum_: float = 0
   # {k=0..s-1} inclusive
@@ -59,18 +59,18 @@ def incomplete_gamma(
   return incomplete_gamma_
 
 # by Katherine Crowson
-def phi_1(neg_h: FloatTensor):
+def _phi_1(neg_h: FloatTensor):
   return torch.nan_to_num(torch.expm1(neg_h) / neg_h, nan=1.0)
 
 # by Katherine Crowson
-def phi_2(neg_h: FloatTensor):
+def _phi_2(neg_h: FloatTensor):
   return torch.nan_to_num((torch.expm1(neg_h) - neg_h) / neg_h**2, nan=0.5)
 
 # by Katherine Crowson
-def phi_3(neg_h: FloatTensor):
+def _phi_3(neg_h: FloatTensor):
   return torch.nan_to_num((torch.expm1(neg_h) - neg_h - neg_h**2 / 2) / neg_h**3, nan=1 / 6)
 
-def phi(
+def _phi(
   neg_h: float,
   j: int,
 ):
@@ -93,8 +93,8 @@ def phi(
   requires j>0
   """
   assert j > 0
-  gamma_: float = gamma(j)
-  incomp_gamma_: float = incomplete_gamma(j, neg_h, gamma_s=gamma_)
+  gamma_: float = _gamma(j)
+  incomp_gamma_: float = _incomplete_gamma(j, neg_h, gamma_s=gamma_)
 
   phi_: float = math.exp(neg_h) * neg_h**-j * (1-incomp_gamma_/gamma_)
 
@@ -105,7 +105,7 @@ class RESDECoeffsSecondOrder(NamedTuple):
   b1: float
   b2: float
 
-def de_second_order(
+def _de_second_order(
   h: float,
   c2: float,
   simple_phi_calc = False,
@@ -120,15 +120,15 @@ def de_second_order(
   """
   if simple_phi_calc:
     # Kat computed simpler expressions for phi for cases j={1,2,3}
-    a2_1: float = c2 * phi_1(-c2*h)
-    phi1: float = phi_1(-h)
-    phi2: float = phi_2(-h)
+    a2_1: float = c2 * _phi_1(-c2*h)
+    phi1: float = _phi_1(-h)
+    phi2: float = _phi_2(-h)
   else:
     # I computed general solution instead.
     # they're close, but there are slight differences. not sure which would be more prone to numerical error.
-    a2_1: float = c2 * phi(j=1, neg_h=-c2*h)
-    phi1: float = phi(j=1, neg_h=-h)
-    phi2: float = phi(j=2, neg_h=-h)
+    a2_1: float = c2 * _phi(j=1, neg_h=-c2*h)
+    phi1: float = _phi(j=1, neg_h=-h)
+    phi2: float = _phi(j=2, neg_h=-h)
   phi2_c2: float = phi2/c2
   b1: float = phi1 - phi2_c2
   b2: float = phi2_c2
@@ -138,11 +138,12 @@ def de_second_order(
     b2=b2,
   )  
 
-def refined_exp_sosu_step(
+def _refined_exp_sosu_step(
   model: DenoiserModel,
   x: FloatTensor,
   sigma: FloatTensor,
   sigma_next: FloatTensor,
+  c2 = 0.5,
   extra_args: Dict[str, Any] = {},
   pbar: Optional[tqdm] = None,
   simple_phi_calc = False,
@@ -150,13 +151,26 @@ def refined_exp_sosu_step(
   """
   Algorithm 1 "RES Second order Single Update Step with c2"
   https://arxiv.org/abs/2308.02157
+
+  Parameters:
+    model (`DenoiserModel`): a k-diffusion wrapped denoiser model (e.g. a subclass of DiscreteEpsDDPMDenoiser)
+    x (`FloatTensor`): noised latents (or RGB I suppose), e.g. torch.randn((B, C, H, W)) * sigma[0]
+    sigma (`FloatTensor`): timestep to denoise
+    sigma_next (`FloatTensor`): timestep+1 to denoise
+    c2 (`float`, *optional*, defaults to .5): partial step size for solving ODE. .5 = midpoint method
+    extra_args (`Dict[str, Any]`, *optional*, defaults to `{}`): kwargs to pass to `model#__call__()`
+    pbar (`tqdm`, *optional*, defaults to `None`): progress bar to update after each model call
+    simple_phi_calc (`bool`, *optional*, defaults to `True`): True = calculate phi_i,j(-h) via simplified formulae specific to j={1,2}. False = Use general solution that works for any j. Mathematically equivalent, but could be numeric differences.
   """
   lam_next, lam = (s.log().neg() for s in (sigma_next, sigma))
+
+  # type hints aren't strictly true regarding float vs FloatTensor.
+  # everything gets promoted to `FloatTensor` after interacting with `sigma: FloatTensor`.
+  # I will use float to indicate any variables which are scalars.
   h: float = lam_next - lam
-  c2 = 0.5
-  a2_1, b1, b2 = de_second_order(h=h, c2=c2, simple_phi_calc=simple_phi_calc)
+  a2_1, b1, b2 = _de_second_order(h=h, c2=c2, simple_phi_calc=simple_phi_calc)
   
-  denoised: FloatTensor = model(x, sigma.unsqueeze(0).to(x.device), **extra_args)
+  denoised: FloatTensor = model(x, sigma, **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -166,7 +180,7 @@ def refined_exp_sosu_step(
   lam_2: float = lam + c2_h
   sigma_2: float = lam_2.neg().exp()
 
-  denoised2: FloatTensor = model(x_2, sigma_2.unsqueeze(0).to(x.device), **extra_args)
+  denoised2: FloatTensor = model(x_2, sigma_2, **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -183,37 +197,47 @@ def refined_exp_sosu_step(
 def sample_refined_exp_s(
   model: FloatTensor,
   x: FloatTensor,
-  sigmas: Union[FloatTensor, List[float]],
+  sigmas: FloatTensor,
   denoise_to_zero: bool = True,
   extra_args: Dict[str, Any] = {},
   callback: Optional[RefinedExpCallback] = None,
   disable: Optional[bool] = None,
-  # degree of stochasticity, η, from 0 to len(sigmas)
-  ita = 0.,
+  ita: FloatTensor = torch.zeros((1,)),
+  c2 = .5,
   noise_sampler: NoiseSampler = torch.randn_like,
-  # True = use the simpler phi expressions Kat computed for j={1,2,3}
-  # False = use the general phi expression I computed. both similar. not sure which would have more numerical error.
   simple_phi_calc = True,
 ):
   """
   Refined Exponential Solver (S).
-  Algorithm 2 "RES Single-Step Sampler"
+  Algorithm 2 "RES Single-Step Sampler" with Algorithm 1 second-order step
   https://arxiv.org/abs/2308.02157
+
+  Parameters:
+    model (`DenoiserModel`): a k-diffusion wrapped denoiser model (e.g. a subclass of DiscreteEpsDDPMDenoiser)
+    x (`FloatTensor`): noised latents (or RGB I suppose), e.g. torch.randn((B, C, H, W)) * sigma[0]
+    sigmas (`FloatTensor`): sigmas (ideally an exponential schedule!) e.g. get_sigmas_exponential(n=25, sigma_min=model.sigma_min, sigma_max=model.sigma_max)
+    denoise_to_zero (`bool`, *optional*, defaults to `True`): whether to finish with a first-order step down to 0 (rather than stopping at sigma_min). True = fully denoise image. False = match Algorithm 2 in paper
+    extra_args (`Dict[str, Any]`, *optional*, defaults to `{}`): kwargs to pass to `model#__call__()`
+    callback (`RefinedExpCallback`, *optional*, defaults to `None`): you can supply this callback to see the intermediate denoising results, e.g. to preview each step of the denoising process
+    disable (`bool`, *optional*, defaults to `False`): whether to hide `tqdm`'s progress bar animation from being printed
+    ita (`FloatTensor`, *optional*, defaults to 0.): degree of stochasticity, η, for each timestep. tensor shape must be broadcastable to 1-dimensional tensor with length `len(sigmas) if denoise_to_zero else len(sigmas)-1`. each element should be from 0 to 1.
+    c2 (`float`, *optional*, defaults to .5): partial step size for solving ODE. .5 = midpoint method
+    noise_sampler (`NoiseSampler`, *optional*, defaults to `torch.randn_like`): method used for adding noise
+    simple_phi_calc (`bool`, *optional*, defaults to `True`): True = calculate phi_i,j(-h) via simplified formulae specific to j={1,2}. False = Use general solution that works for any j. Mathematically equivalent, but could be numeric differences.
   """
   assert sigmas[-1] == 0
-  # we're gonna be doing a lot of single-element arithmetic on sigmas, so don't wanna be transferring those to/from GPU so often
-  if torch.is_tensor(sigmas):
-    sigmas.cpu()
+  ita = ita.to(x.device)
   with tqdm(disable=disable, total=len(sigmas)-(1 if denoise_to_zero else 2)) as pbar:
-    for i, (sigma, sigma_next) in enumerate(pairwise(sigmas[:-1])):
+    for i, (sigma, sigma_next) in enumerate(pairwise(sigmas[:-1].split(1))):
       eps: FloatTensor = noise_sampler(x)
       sigma_hat = sigma * (1 + ita)
       x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-      x_next, denoised, denoised2 = refined_exp_sosu_step(
+      x_next, denoised, denoised2 = _refined_exp_sosu_step(
         model,
         x_hat,
         sigma_hat,
         sigma_next,
+        c2=c2,
         extra_args=extra_args,
         pbar=pbar,
         simple_phi_calc=simple_phi_calc,
@@ -233,7 +257,7 @@ def sample_refined_exp_s(
       eps: FloatTensor = noise_sampler(x)
       sigma_hat = sigma * (1 + ita)
       x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-      x_next: FloatTensor = model(x_hat, sigma.unsqueeze(0).to(x_hat.device))
+      x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
       pbar.update()
       x = x_next
   return x
