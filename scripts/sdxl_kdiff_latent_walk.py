@@ -19,6 +19,7 @@ from pathlib import Path
 from PIL import Image
 from functools import partial
 from time import perf_counter
+from argparse import ArgumentParser, Namespace
 
 from src.iteration.batched import batched
 from src.denoisers.denoiser_proto import Denoiser
@@ -57,6 +58,19 @@ from src.clip_pooling import forward_penultimate_hidden_state, pool_and_project_
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
 
+def setup_parser() -> ArgumentParser:
+  parser = ArgumentParser()
+  parser.add_argument(
+    '--base_unet',
+    type=str,
+    default='stabilityai/stable-diffusion-xl-base-1.0',
+    help='Checkpoint from which to load SDXL checkpoint. Defaults to "stabilityai/stable-diffusion-xl-base-1.0". Accepts HF model names or directory paths. We will load only the base UNet from this model, and we expect the UNet state to live in a "unet" subdirectory (i.e. same directory structure as Birchlabs/waifu-diffusion-xl-unofficial).',
+  )
+  return parser
+
+parser: ArgumentParser = setup_parser()
+args: Namespace = parser.parse_args()
+
 logger: Logger = getLogger(__file__)
 
 device_type: DeviceType = get_device_type()
@@ -71,14 +85,14 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-use_wdxl = False
+use_wdxl = True
 
-stability_model_name = 'stabilityai/stable-diffusion-xl-base-0.9'
-wdxl_model_name = 'Birchlabs/waifu-diffusion-xl-unofficial'
+stability_model_name = 'stabilityai/stable-diffusion-xl-base-1.0'
+wdxl_model_name = args.base_unet
 default_model_name = stability_model_name
 base_unet_model_name = wdxl_model_name if use_wdxl else stability_model_name
 
-use_refiner = True
+use_refiner = False
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   unet_name,
   torch_dtype=torch.float16,
@@ -87,7 +101,7 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   subfolder='unet',
 ).eval() for unet_name in [
   base_unet_model_name,
-  *(['stabilityai/stable-diffusion-xl-refiner-0.9'] * use_refiner),
+  *(['stabilityai/stable-diffusion-xl-refiner-1.0'] * use_refiner),
   ]
 ]
 base_unet: UNet2DConditionModel = unets[0]
@@ -223,23 +237,35 @@ keyframes: List[PromptType] = [
   ) if cfg_scale > 1 else NoCFGPrompts(
     prompt=prompt,
   ) for prompt in [
-    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
-    'the dragon attacks at night, masterpiece, dramatic, highly detailed, high dynamic range',
-    'the dragon attacks Neo-Tokyo at night, masterpiece, dramatic, highly detailed, high dynamic range',
-    'watercolour illustration of Japanese lanterns floating down river, festival, moonlight',
-    'thousands of fireflies on the river at night, moonlight, grass, trees, 4k, dslr, cinematic, masterpiece',
-    'photo of astronaut meditating under waterfall, in swimming shorts, moonlight, breathtaking, 4k, dslr, cinematic, global illumination, realistic, highly detailed',
-    'character portrait of steampunk lady, ponytail, hat, masterpiece, intricate detail',
-    'art of refined steampunk gentleman, wearing suspenders, holding timepiece, monocle, well-groomed beard and moustache',
-    'an explorer struggles to get out of quicksand',
-    'an explorer struggles to get out of quicksand, desert',
-    'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
-    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
-    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto, vaporwave',
-    'fish swimming up waterfall of mercury, aurora borealis',
-    'illustration of gamer girl with blue hair, sitting in chair with knees up, focusing intently on computer',
-    'illustration of gamer girl with pink hair, sitting in chair with knees up, focusing intently on computer',
-    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
+    # 'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
+    # 'the dragon attacks at night, masterpiece, dramatic, highly detailed, high dynamic range',
+    # 'the dragon attacks Neo-Tokyo at night, masterpiece, dramatic, highly detailed, high dynamic range',
+    # 'watercolour illustration of Japanese lanterns floating down river, festival, moonlight',
+    # 'thousands of fireflies on the river at night, moonlight, grass, trees, 4k, dslr, cinematic, masterpiece',
+    # 'photo of astronaut meditating under waterfall, in swimming shorts, moonlight, breathtaking, 4k, dslr, cinematic, global illumination, realistic, highly detailed',
+    # 'character portrait of steampunk lady, ponytail, hat, masterpiece, intricate detail',
+    # 'art of refined steampunk gentleman, wearing suspenders, holding timepiece, monocle, well-groomed beard and moustache',
+    # 'an explorer struggles to get out of quicksand',
+    # 'an explorer struggles to get out of quicksand, desert',
+    # 'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
+    # 'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
+    # 'photograph of a torii gate in the rain, high up a mountain pass in Kyoto, vaporwave',
+    # 'fish swimming up waterfall of mercury, aurora borealis',
+    # 'illustration of gamer girl with blue hair, sitting in chair with knees up, focusing intently on computer',
+    # 'illustration of gamer girl with pink hair, sitting in chair with knees up, focusing intently on computer',
+    # 'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
+    'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck',
+    'pixiv, masterpiece, best quality, 1girl, aqua eyes, baseball cap, blonde hair, closed mouth, earrings, green background, hat, hoop earrings, jewelry, looking at viewer, shirt, short hair, simple background, solo, upper body, yellow shirt,',
+    'artoria pendragon (fate), masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, ribbon, outdoors, watercolor',
+    'konpaku youmu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    'kaname madoka, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    'tomoe mami, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, white shirt, outdoors, colored pencil (medium)',
+    'tohsaka rin, masterpiece, best quality, 1girl, looking at viewer, looking at viewer, upper body, indoors, marker (medium)',
+    'matou sakura, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, indoors, marker (medium)',
+    'hakurei reimu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors',
+    'kirisame marisa, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, white apron, black dress, outdoors',
+    'remilia scarlet, reddizen, 1girl, ascot, silver hair, blush, bow, closed mouth, collared shirt, hair between eyes, hat, hat bow, looking at viewer, medium hair, mob cap, one side up, purple background, puffy short sleeves, puffy sleeves, red bow, red eyes, pink vest, shirt, short sleeves, simple background, sketch, smile, solo, upper body, vest, pink headwear, pink shirt, red ascot',
+    ', flandre scarlet, reddizen, 1girl, ascot, blonde hair, blush, bow, closed mouth, collared shirt, hair between eyes, hat, hat bow, looking at viewer, medium hair, mob cap, one side up, orange background, puffy short sleeves, puffy sleeves, red bow, red eyes, red vest, shirt, short sleeves, simple background, sketch, smile, solo, upper body, vest, white headwear, white shirt, yellow ascot',
   ]
 ]
 
@@ -267,11 +293,14 @@ def make_inbetween(params: ManneredInBetweenParams[PromptType, InterpManner]) ->
     strategy=params.manner.strategy,
   )
 
-frames: List[SampleSpec] = intersperse_linspace(
-  keyframes=keyframes,
-  make_inbetween=make_inbetween,
-  interp_specs=interp_specs,
-)
+# hidden state walk commented-out. easy way to just output each keyframe, without producing an animation.
+# frames: List[SampleSpec] = intersperse_linspace(
+#   keyframes=keyframes,
+#   make_inbetween=make_inbetween,
+#   interp_specs=interp_specs,
+# )
+
+frames: List[CFGPrompts] = keyframes
 
 all_zeros_hidden_states: List[Optional[FloatTensor]] = [
   zeros(
