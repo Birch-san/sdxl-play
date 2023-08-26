@@ -10,7 +10,7 @@ from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable, Dict, Any
 from logging import getLogger, Logger
-from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
+from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m#, get_sigmas_exponential, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
 from os import makedirs, listdir
 from os.path import join
 import fnmatch
@@ -18,6 +18,7 @@ from pathlib import Path
 from PIL import Image
 from functools import partial
 from time import perf_counter
+from argparse import ArgumentParser, Namespace
 
 from src.iteration.batched import batched
 from src.denoisers.denoiser_proto import Denoiser
@@ -42,6 +43,20 @@ from src.refined_exp_solver import sample_refined_exp_s
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
 
+
+def setup_parser() -> ArgumentParser:
+  parser = ArgumentParser()
+  parser.add_argument(
+    '--base_unet',
+    type=str,
+    default='stabilityai/stable-diffusion-xl-base-1.0',
+    help='Checkpoint from which to load SDXL checkpoint. Defaults to "stabilityai/stable-diffusion-xl-base-1.0". Accepts HF model names or directory paths. We will load only the base UNet from this model, and we expect the UNet state to live in a "unet" subdirectory (i.e. same directory structure as Birchlabs/waifu-diffusion-xl-unofficial).',
+  )
+  return parser
+
+parser: ArgumentParser = setup_parser()
+args: Namespace = parser.parse_args()
+
 logger: Logger = getLogger(__file__)
 
 device_type: DeviceType = get_device_type()
@@ -56,14 +71,14 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-use_wdxl = False
+use_wdxl = True
 
-stability_model_name = 'stabilityai/stable-diffusion-xl-base-0.9'
-wdxl_model_name = 'Birchlabs/waifu-diffusion-xl-unofficial'
+stability_model_name = 'stabilityai/stable-diffusion-xl-base-1.0'
+wdxl_model_name = args.base_unet
 default_model_name = stability_model_name
 base_unet_model_name = wdxl_model_name if use_wdxl else stability_model_name
 
-use_refiner = True
+use_refiner = False
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   unet_name,
   torch_dtype=torch.float16,
@@ -72,7 +87,7 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   subfolder='unet',
 ).eval() for unet_name in [
   base_unet_model_name,
-  *(['stabilityai/stable-diffusion-xl-refiner-0.9'] * use_refiner),
+  *(['stabilityai/stable-diffusion-xl-refiner-1.0'] * use_refiner),
   ]
 ]
 base_unet: UNet2DConditionModel = unets[0]
@@ -211,7 +226,8 @@ else:
 negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
 # prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+prompt: str = 'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck'
 prompts: List[str] = [
   *([] if negative_prompt is None or cfg_scale == 1. else [negative_prompt]),
   prompt,
@@ -372,29 +388,29 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-# schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
-# schedule: KarrasScheduleParams = get_template_schedule(
-#   schedule_template,
-#   model_sigma_min=base_unet_k_wrapped.sigma_min,
-#   model_sigma_max=base_unet_k_wrapped.sigma_max,
-#   device=base_unet_k_wrapped.sigmas.device,
-#   dtype=base_unet_k_wrapped.sigmas.dtype,
-# )
+schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+schedule: KarrasScheduleParams = get_template_schedule(
+  schedule_template,
+  model_sigma_min=base_unet_k_wrapped.sigma_min,
+  model_sigma_max=base_unet_k_wrapped.sigma_max,
+  device=base_unet_k_wrapped.sigmas.device,
+  dtype=base_unet_k_wrapped.sigmas.dtype,
+)
 
-# steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
-# sigmas: FloatTensor = get_sigmas_karras(
-#   n=steps,
-#   sigma_max=sigma_max.cpu(),
-#   sigma_min=sigma_min.cpu(),
-#   rho=rho,
-#   device=device,
-# ).to(sampling_dtype)
-sigmas: FloatTensor = get_sigmas_exponential(
-  n=25,
-  sigma_min=base_unet_k_wrapped.sigma_min,
-  sigma_max=base_unet_k_wrapped.sigma_max,
+steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
+sigmas: FloatTensor = get_sigmas_karras(
+  n=steps,
+  sigma_max=sigma_max.cpu(),
+  sigma_min=sigma_min.cpu(),
+  rho=rho,
   device=device,
 ).to(sampling_dtype)
+# sigmas: FloatTensor = get_sigmas_exponential(
+#   n=25,
+#   sigma_min=base_unet_k_wrapped.sigma_min,
+#   sigma_max=base_unet_k_wrapped.sigma_max,
+#   device=device,
+# ).to(sampling_dtype)
 
 # here's how to use non-Karras sigmas
 # steps=25
@@ -442,7 +458,7 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 2
+max_batch_size = 8
 
 start_seed = 42
 sample_count = 8
@@ -546,8 +562,8 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   tic: float = perf_counter()
 
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
-    # denoised_latents: FloatTensor = sample_dpmpp_2m(
-    denoised_latents: FloatTensor = sample_refined_exp_s(
+    denoised_latents: FloatTensor = sample_dpmpp_2m(
+    # denoised_latents: FloatTensor = sample_refined_exp_s(
       denoiser,
       latents,
       sigmas,
