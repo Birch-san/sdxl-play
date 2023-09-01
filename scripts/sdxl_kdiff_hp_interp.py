@@ -18,6 +18,7 @@ from pathlib import Path
 from PIL import Image
 from functools import partial
 from itertools import pairwise
+from dctorch.functional import dct2, idct2
 
 from src.denoisers.denoiser_proto import Denoiser
 from src.denoisers.denoiser_factory import DenoiserFactory, DenoiserFactoryFactory
@@ -39,6 +40,7 @@ from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
 from src.interpolation.kld_bridgeish import kld_bridgeish
 from src.interpolation.ornstein_uhlenbeck_bridge import ornstein_uhlenbeck_bridge
+from src.iteration.batched import batched
 
 logger: Logger = getLogger(__file__)
 
@@ -54,14 +56,14 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-use_wdxl = False
+use_wdxl = True
 
 stability_model_name = 'stabilityai/stable-diffusion-xl-base-0.9'
-wdxl_model_name = 'Birchlabs/waifu-diffusion-xl-unofficial'
+wdxl_model_name = '/home/birch/ml-weights/wdxl-step00006000'
 default_model_name = stability_model_name
 base_unet_model_name = wdxl_model_name if use_wdxl else stability_model_name
 
-use_refiner = True
+use_refiner = False
 unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
   unet_name,
   torch_dtype=torch.float16,
@@ -202,8 +204,8 @@ negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
 # prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
 # prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
-prompt: str = 'absolute power is a door into dreaming, by ross tran, oil on canvas'
-# prompt: str = 'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck'
+# prompt: str = 'absolute power is a door into dreaming, by ross tran, oil on canvas'
+prompt: str = 'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck'
 # prompt: str = 'pixiv, masterpiece, best quality, 1girl, aqua eyes, baseball cap, blonde hair, closed mouth, earrings, green background, hat, hoop earrings, jewelry, looking at viewer, shirt, short hair, simple background, solo, upper body, yellow shirt,'
 # prompt: str = 'beautiful, 1girl, flandre scarlet touhou, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen'
 prompts: List[str] = [
@@ -384,7 +386,7 @@ if use_refiner:
 # denoising from a later sigma than sigma_max.
 start_sigma = sigmas[0]
 
-out_dir = 'out_kinterp11'
+out_dir = 'out_hp_interp'
 makedirs(out_dir, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
@@ -400,60 +402,46 @@ generator = Generator(device='cpu')
 
 max_batch_size = 8
 
-sampling_steps_per_transition = 151
-subsampling = 1
-q=1.
-u=100
-t_end=1.
+sampling_steps_per_transition = 8
 
-keyframes = [400, 401, 402, 403, 400]
+keyframes: List[int] = [400, 401]
+frame_seeds: List[int] = [*[f_seed for k_seed in keyframes[:-1] for f_seed in [k_seed]*(sampling_steps_per_transition-1)], keyframes[-1]]
+noise_keyframes = [randn(
+  (
+    latents_shape.channels,
+    latents_shape.height,
+    latents_shape.width
+  ),
+  dtype=sampling_dtype,
+  device=generator.device,
+  generator=generator.manual_seed(seed),
+).to(device) for seed in keyframes]
+first_frame, *_ = noise_keyframes
 
-noises: Optional[FloatTensor] = None
-linsp: Optional[FloatTensor] = None
-for start_seed, end_seed in pairwise(keyframes):
-  new_noises: FloatTensor = kld_bridgeish(
-    sampling_steps_per_transition,
-    start=randn(
-      (
-        latents_shape.channels,
-        latents_shape.height,
-        latents_shape.width
-      ),
-      dtype=sampling_dtype,
-      device=generator.device,
-      generator=generator.manual_seed(start_seed),
-    ).to(device),
-    end=randn(
-      (
-        latents_shape.channels,
-        latents_shape.height,
-        latents_shape.width
-      ),
-      dtype=sampling_dtype,
-      device=generator.device,
-      generator=generator.manual_seed(end_seed),
-    ).to(device),
-    t_end=t_end,
-    q=q,
-    u=u,
-    generator=Generator(device=device).manual_seed(start_seed),
-  )
-  new_linsp: FloatTensor = pad(torch.linspace(0, t_end, sampling_steps_per_transition - 1, device=device), pad=(1, 0), mode='constant')
-  new_noises = new_noises[::subsampling]
-  new_linsp = new_linsp[::subsampling]
-  # sorry, not the prettiest way to accumulate
-  if noises is None:
-    noises = new_noises
-    linsp = new_linsp
-  else:
-    noises = cat([
-      noises[:-1],
-      new_noises,
-    ])
-    linsp = cat([
-      linsp[:-1],
-      new_linsp,
-    ])
+highpass_cutoff = 4
+h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsqueeze(-1) <= highpass_cutoff
+w_freeze: BoolTensor = torch.arange(latents_shape.width, device=device).unsqueeze(0) <= highpass_cutoff
+freeze: BoolTensor = (h_freeze & w_freeze).unsqueeze(0)
+
+linsp_inclusive: FloatTensor = torch.linspace(0, 1, sampling_steps_per_transition+1, device=device)
+linsp_exclusive: FloatTensor = linsp_inclusive[:-1]
+linsp_acc: FloatTensor = pad(linsp_exclusive.repeat(len(keyframes)), pad=(0, 1), mode='constant')
+quotients_per_interp: List[FloatTensor] = [
+  *[linsp_exclusive.reshape(-1, 1, 1, 1)] * (len(keyframes)-1),
+  linsp_inclusive.reshape(-1, 1, 1, 1),
+]
+
+interp_dcts: List[FloatTensor] = []
+for quotients, (start, end) in zip(quotients_per_interp, pairwise(noise_keyframes)):
+  start_dct, end_dct = dct2(torch.stack([start, end]))
+  end_fadein: FloatTensor = end_dct * quotients
+  start_fadeout: FloatTensor = start_dct * (1-quotients)
+  dct_interped: FloatTensor = start_fadeout + end_fadein
+
+  dct_hp_interped: FloatTensor = torch.where(freeze, first_frame, dct_interped)
+  interp_dcts.append(dct_hp_interped)
+
+noise_frames: Optional[FloatTensor] = idct2(cat(interp_dcts))
 
 if not swap_models:
   base_unet.to(device)
@@ -463,16 +451,16 @@ if not swap_models:
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
-print(f'Generating {noises.size(0)} images, in batches of {max_batch_size}')
+print(f'Generating {noise_frames.size(0)} images, from seeds {frame_seeds} in batches of {max_batch_size}')
 
-for batch_ix, (latents, quotients) in enumerate(zip(noises.split(max_batch_size), linsp.split(max_batch_size))):
+for batch_ix, (latents, frame_seeds_, quotients) in enumerate(zip(noise_frames.split(max_batch_size), batched(frame_seeds, max_batch_size), linsp_acc.split(max_batch_size))):
   batch_size: int = latents.size(0)
-  print(f'Generating a batch of {batch_size} images, quotients {quotients}')
+  print(f'Generating a batch of {batch_size} images, seeds {frame_seeds_}, quotients {quotients}')
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_s{start_seed}_u{u}_q{q}_t{quotient}'
-    for sample_ix, quotient in enumerate(quotients)
+    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_s{frame_seed}_t{quotient}'
+    for sample_ix, (quotient, frame_seed) in enumerate(zip(quotients, frame_seeds_))
   ]
 
   base_added_cond_kwargs = CondKwargs(
