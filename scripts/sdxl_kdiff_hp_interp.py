@@ -402,10 +402,10 @@ generator = Generator(device='cpu')
 
 max_batch_size = 8
 
-sampling_steps_per_transition = 8
+betweens = 7
 
 keyframes: List[int] = [400, 401]
-frame_seeds: List[int] = [*[f_seed for k_seed in keyframes[:-1] for f_seed in [k_seed]*(sampling_steps_per_transition-1)], keyframes[-1]]
+frame_seeds: List[int] = [*[f_seed for k_seed in keyframes[:-1] for f_seed in [k_seed]*betweens], keyframes[-1]]
 noise_keyframes = [randn(
   (
     latents_shape.channels,
@@ -418,16 +418,16 @@ noise_keyframes = [randn(
 ).to(device) for seed in keyframes]
 first_frame, *_ = noise_keyframes
 
-highpass_cutoff = 4
+highpass_cutoff = 112
 h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsqueeze(-1) <= highpass_cutoff
 w_freeze: BoolTensor = torch.arange(latents_shape.width, device=device).unsqueeze(0) <= highpass_cutoff
 freeze: BoolTensor = (h_freeze & w_freeze).unsqueeze(0)
 
-linsp_inclusive: FloatTensor = torch.linspace(0, 1, sampling_steps_per_transition+1, device=device)
+linsp_inclusive: FloatTensor = torch.linspace(0, 1, betweens+1, device=device)
 linsp_exclusive: FloatTensor = linsp_inclusive[:-1]
 linsp_acc: FloatTensor = pad(linsp_exclusive.repeat(len(keyframes)), pad=(0, 1), mode='constant')
 quotients_per_interp: List[FloatTensor] = [
-  *[linsp_exclusive.reshape(-1, 1, 1, 1)] * (len(keyframes)-1),
+  *[linsp_exclusive.reshape(-1, 1, 1, 1)] * (len(keyframes)-2),
   linsp_inclusive.reshape(-1, 1, 1, 1),
 ]
 
