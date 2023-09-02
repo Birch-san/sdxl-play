@@ -19,6 +19,7 @@ from PIL import Image
 from functools import partial
 from itertools import pairwise
 from dctorch.functional import dct2, idct2
+import math
 
 from src.denoisers.denoiser_proto import Denoiser
 from src.denoisers.denoiser_factory import DenoiserFactory, DenoiserFactoryFactory
@@ -418,7 +419,7 @@ noise_keyframes = [randn(
 ).to(device) for seed in keyframes]
 first_frame, *_ = noise_keyframes
 
-highpass_cutoff = 112
+highpass_cutoff = 4
 h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsqueeze(-1) <= highpass_cutoff
 w_freeze: BoolTensor = torch.arange(latents_shape.width, device=device).unsqueeze(0) <= highpass_cutoff
 freeze: BoolTensor = (h_freeze & w_freeze).unsqueeze(0)
@@ -434,8 +435,8 @@ quotients_per_interp: List[FloatTensor] = [
 interp_dcts: List[FloatTensor] = []
 for quotients, (start, end) in zip(quotients_per_interp, pairwise(noise_keyframes)):
   start_dct, end_dct = dct2(torch.stack([start, end]))
-  end_fadein: FloatTensor = end_dct * quotients
-  start_fadeout: FloatTensor = start_dct * (1-quotients)
+  end_fadein: FloatTensor = end_dct * (quotients * math.pi * .5).cos()
+  start_fadeout: FloatTensor = start_dct * (quotients * math.pi * .5).sin()
   dct_interped: FloatTensor = start_fadeout + end_fadein
 
   dct_hp_interped: FloatTensor = torch.where(freeze, first_frame, dct_interped)
