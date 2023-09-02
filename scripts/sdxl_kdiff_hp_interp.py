@@ -423,6 +423,7 @@ noise_keyframes = [randn(
   generator=generator.manual_seed(seed),
 ).to(device) for seed in keyframes]
 first_frame, *_ = noise_keyframes
+first_frame_dct = dct2(first_frame)
 
 highpass_cutoff = 4
 h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsqueeze(-1) <= highpass_cutoff
@@ -440,7 +441,7 @@ for quotients, (start, end) in zip(quotients_per_interp, pairwise(noise_keyframe
   end_fadein: FloatTensor = end_dct * (quotients * math.pi * .5).sin()
   dct_interped: FloatTensor = start_fadeout + end_fadein
 
-  dct_hp_interped: FloatTensor = torch.where(freeze, first_frame, dct_interped)
+  dct_hp_interped: FloatTensor = torch.where(freeze, first_frame_dct, dct_interped)
   interp_dcts.append(dct_hp_interped)
 
 # if our end isn't a duplicate of our start, let's render it
@@ -449,7 +450,7 @@ if keyframes[0] != keyframes[-1]:
   interp_quotients: FloatTensor = pad(interp_quotients, pad=(0, 1), mode='constant')
   # being the final frame, there's no "next frame" to interpolate to
   dct: FloatTensor = dct2(noise_keyframes[-1])
-  dct_hp: FloatTensor = torch.where(freeze, first_frame, dct)
+  dct_hp: FloatTensor = torch.where(freeze, first_frame_dct, dct)
   interp_dcts.append(dct_hp.unsqueeze(0))
 
 noise_frames: Optional[FloatTensor] = idct2(cat(interp_dcts))
