@@ -405,7 +405,12 @@ max_batch_size = 8
 
 betweens = 7
 
-keyframes: List[int] = [400, 401]
+loop_keyframes = True
+start_seed = 42
+seed_count = 8
+keyframes: List[int] = list(range(start_seed, start_seed+seed_count))
+if loop_keyframes:
+  keyframes = [*keyframes, start_seed]
 frame_seeds: List[int] = [*[f_seed for k_seed in keyframes[:-1] for f_seed in [k_seed]*betweens], keyframes[-1]]
 noise_keyframes = [randn(
   (
@@ -424,23 +429,28 @@ h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsquee
 w_freeze: BoolTensor = torch.arange(latents_shape.width, device=device).unsqueeze(0) <= highpass_cutoff
 freeze: BoolTensor = (h_freeze & w_freeze).unsqueeze(0)
 
-linsp_inclusive: FloatTensor = torch.linspace(0, 1, betweens+1, device=device)
-linsp_exclusive: FloatTensor = linsp_inclusive[:-1]
-linsp_acc: FloatTensor = pad(linsp_exclusive.repeat(len(keyframes)), pad=(0, 1), mode='constant')
-quotients_per_interp: List[FloatTensor] = [
-  *[linsp_exclusive.reshape(-1, 1, 1, 1)] * (len(keyframes)-2),
-  linsp_inclusive.reshape(-1, 1, 1, 1),
-]
+linsp: FloatTensor = torch.linspace(0, 1, betweens+1, device=device)
+interp_quotients: FloatTensor = linsp[:-1].repeat(len(keyframes)-1)
+quotients_per_interp: List[FloatTensor] = interp_quotients.reshape(-1, 1, 1, 1).split(betweens)
 
 interp_dcts: List[FloatTensor] = []
 for quotients, (start, end) in zip(quotients_per_interp, pairwise(noise_keyframes)):
   start_dct, end_dct = dct2(torch.stack([start, end]))
-  end_fadein: FloatTensor = end_dct * (quotients * math.pi * .5).cos()
-  start_fadeout: FloatTensor = start_dct * (quotients * math.pi * .5).sin()
+  start_fadeout: FloatTensor = start_dct * (quotients * math.pi * .5).cos()
+  end_fadein: FloatTensor = end_dct * (quotients * math.pi * .5).sin()
   dct_interped: FloatTensor = start_fadeout + end_fadein
 
   dct_hp_interped: FloatTensor = torch.where(freeze, first_frame, dct_interped)
   interp_dcts.append(dct_hp_interped)
+
+# if our end isn't a duplicate of our start, let's render it
+if keyframes[0] != keyframes[-1]:
+  # add a 0 quotient to the end of our betweens
+  interp_quotients: FloatTensor = pad(interp_quotients, pad=(0, 1), mode='constant')
+  # being the final frame, there's no "next frame" to interpolate to
+  dct: FloatTensor = dct2(noise_keyframes[-1])
+  dct_hp: FloatTensor = torch.where(freeze, first_frame, dct)
+  interp_dcts.append(dct_hp.unsqueeze(0))
 
 noise_frames: Optional[FloatTensor] = idct2(cat(interp_dcts))
 
@@ -454,7 +464,7 @@ img_provenance: str = 'refined' if use_refiner else 'base'
 
 print(f'Generating {noise_frames.size(0)} images, from seeds {frame_seeds} in batches of {max_batch_size}')
 
-for batch_ix, (latents, frame_seeds_, quotients) in enumerate(zip(noise_frames.split(max_batch_size), batched(frame_seeds, max_batch_size), linsp_acc.split(max_batch_size))):
+for batch_ix, (latents, frame_seeds_, quotients) in enumerate(zip(noise_frames.split(max_batch_size), batched(frame_seeds, max_batch_size), interp_quotients.split(max_batch_size))):
   batch_size: int = latents.size(0)
   print(f'Generating a batch of {batch_size} images, seeds {frame_seeds_}, quotients {quotients}')
   latents *= start_sigma
