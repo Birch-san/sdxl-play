@@ -7,6 +7,7 @@ from diffusers.models.autoencoder_kl import DecoderOutput, AutoencoderKLOutput
 from diffusers.models.vae import DecoderOutput, DiagonalGaussianDistribution
 from PIL import Image
 import numpy as np
+from src.attn.natten_attn_processor import NattenAttnProcessor
 
 device = torch.device('cuda')
 
@@ -25,7 +26,7 @@ vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   use_safetensors=True,
   **vae_kwargs,
 )
-# vae.set_attn_processor(SlicedAttnProcessor())
+vae.set_attn_processor(NattenAttnProcessor())
 # vae.enable_slicing()
 vae.eval().to(device)
 
