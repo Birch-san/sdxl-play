@@ -1,5 +1,13 @@
-import torch.nn.functional as F
 from diffusers.models.attention import Attention
+import torch
+from torch import FloatTensor, BoolTensor
+from typing import Optional
+from einops import rearrange
+
+try:
+    import natten
+except ImportError:
+    natten = None
 
 class NattenAttnProcessor:
     r"""
@@ -8,81 +16,55 @@ class NattenAttnProcessor:
     https://github.com/huggingface/diffusers/blob/3105c710ba16fa2cf54d8deb158099a4146da511/src/diffusers/models/attention_processor.py
     Once complete: this will make query tokens attend only to key tokens within a certain distance (local neighbourhood).
     """
+    kernel_size: int
 
-    def __init__(self):
-        # TODO: check for NATTEN
-        pass
+    def __init__(self, kernel_size: int):
+        if natten is None:
+            raise ModuleNotFoundError("natten is required for neighborhood attention")
+        self.kernel_size = kernel_size
 
     def __call__(
         self,
         attn: Attention,
-        hidden_states,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        temb=None,
+        hidden_states: FloatTensor,
+        encoder_hidden_states: Optional[FloatTensor] = None,
+        attention_mask: Optional[BoolTensor] = None,
+        temb: Optional[FloatTensor] = None,
     ):
+        assert hasattr(attn, 'qkv'), "Did not find property qkv on attn. Expected you to fuse its q_proj, k_proj, v_proj weights and biases beforehand, and multiply attn.scale into the q weights and bias."
         residual = hidden_states
 
         if attn.spatial_norm is not None:
             hidden_states = attn.spatial_norm(hidden_states, temb)
 
-        input_ndim = hidden_states.ndim
-
-        if input_ndim == 4:
-            batch_size, channel, height, width = hidden_states.shape
-            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
-
-        batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
-        )
-        inner_dim = hidden_states.shape[-1]
+        # assumes MHA (as opposed to GQA)
+        inner_dim: int = attn.qkv.out_features // 3
 
         if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            # scaled_dot_product_attention expects attention_mask shape to be
-            # (batch, heads, source_length, target_length)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+            raise ValueError("No mask customization for neighbourhood attention; the mask is already complicated enough as it is")
+        if encoder_hidden_states is not None:
+            raise ValueError("NATTEN cannot be used for cross-attention. I think.")
 
         if attn.group_norm is not None:
-            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+            hidden_states = attn.group_norm(hidden_states)
+            hidden_states = rearrange(hidden_states, '... c h w -> ... h w c')
 
-        query = attn.to_q(hidden_states)
+        qkv = attn.qkv(hidden_states)
+        # assumes MHA (as opposed to GQA)
+        q, k, v = rearrange(qkv, "n h w (t nh e) -> t n nh h w e", t=3, e=inner_dim)
 
-        if encoder_hidden_states is None:
-            encoder_hidden_states = hidden_states
-        elif attn.norm_cross:
-            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+        qk = natten.functional.natten2dqk(q, k, self.kernel_size, 1)
+        a = torch.softmax(qk, dim=-1)
+        hidden_states = natten.functional.natten2dav(a, v, self.kernel_size, 1)
+        hidden_states = rearrange(hidden_states, "n nh h w e -> n h w (nh e)")
 
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
+        linear_proj, dropout = attn.to_out
+        hidden_states = linear_proj(hidden_states)
+        hidden_states = dropout(hidden_states)
 
-        head_dim = inner_dim // attn.heads
-
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        # TODO: add support for attn.scale when we move to Torch 2.1
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        )
-
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
-
-        # linear proj
-        hidden_states = attn.to_out[0](hidden_states)
-        # dropout
-        hidden_states = attn.to_out[1](hidden_states)
-
-        if input_ndim == 4:
-            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+        hidden_states = rearrange(hidden_states, '... h w c -> ... c h w')
 
         if attn.residual_connection:
             hidden_states = hidden_states + residual
-
-        hidden_states = hidden_states / attn.rescale_output_factor
 
         return hidden_states

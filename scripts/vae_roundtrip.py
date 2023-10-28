@@ -8,6 +8,7 @@ from diffusers.models.vae import DecoderOutput, DiagonalGaussianDistribution
 from PIL import Image
 import numpy as np
 from src.attn.natten_attn_processor import NattenAttnProcessor
+from src.attn.qkv_fusion import fuse_vae_qkv
 
 device = torch.device('cuda')
 
@@ -26,8 +27,10 @@ vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   use_safetensors=True,
   **vae_kwargs,
 )
-vae.set_attn_processor(NattenAttnProcessor())
-# vae.enable_slicing()
+fuse_vae_qkv(vae)
+# you'll need a dev build of NATTEN to use kernel sizes as large as 17. otherwise you'll have to go down to 13.
+vae.set_attn_processor(NattenAttnProcessor(kernel_size=17))
+# vae.enable_slicing() # you probably don't need this any more
 vae.eval().to(device)
 
 def load_img(path) -> FloatTensor:
