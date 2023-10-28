@@ -7,6 +7,9 @@ from diffusers.models.autoencoder_kl import DecoderOutput, AutoencoderKLOutput
 from diffusers.models.vae import DecoderOutput, DiagonalGaussianDistribution
 from PIL import Image
 import numpy as np
+from typing import Literal
+
+from src.attn.null_attn_processor import NullAttnProcessor
 from src.attn.natten_attn_processor import NattenAttnProcessor
 from src.attn.qkv_fusion import fuse_vae_qkv
 
@@ -27,9 +30,30 @@ vae: AutoencoderKL = AutoencoderKL.from_pretrained(
   use_safetensors=True,
   **vae_kwargs,
 )
-fuse_vae_qkv(vae)
-# you'll need a dev build of NATTEN to use kernel sizes as large as 17. otherwise you'll have to go down to 13.
-vae.set_attn_processor(NattenAttnProcessor(kernel_size=17))
+
+attn_impl: Literal['natten', 'null', 'original'] = 'natten'
+match(attn_impl):
+  case 'natten':
+    fuse_vae_qkv(vae)
+    # NATTEN seems to output identical output to global self-attention at kernel size 17
+    # even kernel size 3 looks good (not identical, but very close).
+    # I haven't checked what's the smallest kernel size that can look identical.
+    # should save you loads of memory and compute
+    # (neighbourhood attention costs do not exhibit quadratic scaling with sequence length)
+    vae.set_attn_processor(NattenAttnProcessor(kernel_size=17))
+  case 'null':
+    for attn in [*vae.encoder.mid_block.attentions, *vae.decoder.mid_block.attentions]:
+      # you won't be needing these
+      del attn.to_q, attn.to_k
+    # doesn't mix information between tokens via QK similarity. just projects every token by V and O weights.
+    # looks alright, but is by no means identical to global self-attn.
+    vae.set_attn_processor(NullAttnProcessor())
+  case 'original':
+    # leave it as global self-attention
+    pass
+  case _:
+    raise ValueError('you are spicier than I anticipated')
+
 # vae.enable_slicing() # you probably don't need this any more
 vae.eval().to(device)
 
@@ -58,4 +82,4 @@ with inference_mode():
 
 sample: FloatTensor = decoder_out.sample.div(2).add_(.5).clamp_(0,1)
 
-save_image(sample, 'out.png')
+save_image(sample, f'out.{attn_impl}.png')
