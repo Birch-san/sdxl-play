@@ -67,5 +67,12 @@
       "module": "scripts.in_between_test",
       "justMyCode": false,
     },
+    {
+      "name": "Python: VAE roundtrip",
+      "type": "python",
+      "request": "launch",
+      "module": "scripts.vae_roundtrip",
+      "justMyCode": false,
+    },
   ]
 }
