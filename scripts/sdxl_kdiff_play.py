@@ -41,6 +41,7 @@ from src.attn.flash_attn_processor import FlashAttnProcessor
 # from src.refined_exp_solver import sample_refined_exp_s
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
+from src.latent_interposer.comfy_latent_interposer import Interposer
 
 logger: Logger = getLogger(__file__)
 
@@ -128,37 +129,64 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-use_ollin_vae = True
-vae_kwargs: Dict[str, Any] = {
-  'torch_dtype': torch.float16,
-} if use_ollin_vae else {
-  'variant': 'fp16',
-  'subfolder': 'vae',
-  # decoder gets NaN result in float16.
-  'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
-}
+interpose_latents_to_sd1 = True
+if interpose_latents_to_sd1:
+  from safetensors.torch import load_file
+  from huggingface_hub import hf_hub_download
+  interposer = Interposer()
+  interposer.eval()
+  interposer_weights = str(hf_hub_download(
+    repo_id='city96/SD-Latent-Interposer',
+    filename='xl-to-v1_interposer-v3.1.safetensors')
+  )
+  interposer.load_state_dict(load_file(interposer_weights))
+  interposer.to(torch.float16)
 
-vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else default_model_name,
-  use_safetensors=True,
-  **vae_kwargs,
-)
-# the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
-# (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
-# TODO: rather than slicing *everything* (submit smaller image):
-#       would it be faster to just slice the *attention* (serialize into n groups of (batch, head))?
-#       because attention is likely to be the main layer at threat of encountering OOM.
-#       i.e. vae.set_attn_processor(SlicedAttnProcessor())
-vae.enable_slicing()
-# this script won't be using the encoder
-del vae.encoder
-vae_scale_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
-# vae_scale_factor=8
+  vae_name = 'stabilityai/sd-vae-ft-mse'
+  vae_kwargs: Dict[str, Any] = {
+    'torch_dtype': torch.float16
+  }
+else:
+  use_ollin_vae = True
+  vae_kwargs: Dict[str, Any] = {
+    'torch_dtype': torch.float16,
+  } if use_ollin_vae else {
+    'variant': 'fp16',
+    'subfolder': 'vae',
+    # decoder gets NaN result in float16.
+    'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+  }
+  vae_name = 'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else default_model_name
 
-# TODO: code-share with how we decode images in the non-intermediates case
-latents_to_bchw: LatentsToBCHW = make_latents_to_bchw(vae)
-latents_to_pils: LatentsToPils = make_latents_to_pils(latents_to_bchw)
-make_log_intermediates: LogIntermediatesFactory = make_log_intermediates_factory(latents_to_pils)
+use_consistency_decoder = True
+if use_consistency_decoder:
+  assert interpose_latents_to_sd1, "consistency decoder can only decode SD1 latents, so we'll need the interposer too"
+  assert swap_models, "you're gonna need model-swapping if you wanna fit this thing in memory"
+  # pip install git+https://github.com/openai/consistencydecoder.git
+  from consistencydecoder import ConsistencyDecoder
+  cdecoder = ConsistencyDecoder(device="cuda:0") # Model size: 2.49 GB
+  vae_scaling_factor=0.18215
+  vae_resample_factor=8
+  vae_dtype = torch.float32
+else:
+  vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+    vae_name,
+    use_safetensors=True,
+    **vae_kwargs,
+  )
+  # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
+  # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
+  vae.enable_slicing()
+  # this script won't be using the encoder
+  del vae.encoder
+  vae_resample_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
+  vae_scaling_factor: float = vae.config.scaling_factor
+  vae_dtype = vae.dtype
+
+  # TODO: code-share with how we decode images in the non-intermediates case
+  latents_to_bchw: LatentsToBCHW = make_latents_to_bchw(vae)
+  latents_to_pils: LatentsToPils = make_latents_to_pils(latents_to_bchw)
+  make_log_intermediates: LogIntermediatesFactory = make_log_intermediates_factory(latents_to_pils)
 log_intermediates_enabled = False
 
 def round_down(num: int, divisor: int) -> int:
@@ -168,8 +196,8 @@ area = 1024**2
 # SDXL's aspect-ratio bucketing trained on multiple-of-64 side lengths with close-to-1024**2 area
 width_px: int = round_down(1024, 64)
 height_px: int = round_down(area//width_px, 64)
-width_lt: int = width_px // vae_scale_factor
-height_lt: int = height_px // vae_scale_factor
+width_lt: int = width_px // vae_resample_factor
+height_lt: int = height_px // vae_resample_factor
 
 # TODO: is it height, width or the other way around?
 # note: I think these conditions were mainly useful at training time
@@ -450,9 +478,12 @@ seeds = range(start_seed, start_seed+sample_count)
 
 if not swap_models:
   base_unet.to(device)
-  vae.to(device)
+  if not use_consistency_decoder:
+    vae.to(device)
   if use_refiner:
     refiner_unet.to(device)
+  if interpose_latents_to_sd1:
+    interposer.to(device)
 
 img_provenance: str = 'refined' if use_refiner else 'base'
 
@@ -554,7 +585,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
       eta=1.,
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       callback=callback,
-    ).to(vae.dtype)
+    ).to(vae_dtype)
 
   if profile:
     batch_secs: float = perf_counter() - tic
@@ -565,13 +596,22 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   if swap_models:
     refiner_unet.cpu()
 
-  denoised_latents = denoised_latents / vae.config.scaling_factor
+  denoised_latents = denoised_latents / vae_scaling_factor
 
-  # cannot use flash attn because VAE decoder's self-attn has head_dim 512
-  with inference_mode(), to_device(vae, device) if swap_models else nullcontext():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
-    decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae.dtype))
+  if interpose_latents_to_sd1:
+    with inference_mode(), to_device(interposer, device) if swap_models else nullcontext():
+      denoised_latents = interposer.forward(denoised_latents.to(interposer.head_short.weight.dtype))
 
-  sample: FloatTensor = decoder_out.sample.div(2).add(.5).clamp(0,1)
+  if use_consistency_decoder:
+    with inference_mode():
+      sample: FloatTensor = cdecoder(denoised_latents.to(vae_dtype))
+  else:
+    # cannot use flash attn because VAE decoder's self-attn has head_dim 512
+    with inference_mode(), to_device(vae, device) if swap_models else nullcontext():#, sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
+      decoder_out: DecoderOutput = vae.decode(denoised_latents.to(vae_dtype))
+    sample: FloatTensor = decoder_out.sample
+
+  sample: FloatTensor = sample.div(2).add(.5).clamp(0,1)
   for ix, (decoded, out_stem) in enumerate(zip(sample, out_stems)):
     # if you want lossless images: consider png
     out_name: str = join(out_dir, f'{out_stem}.jpg')
