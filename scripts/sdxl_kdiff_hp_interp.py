@@ -387,7 +387,8 @@ if use_refiner:
 # denoising from a later sigma than sigma_max.
 start_sigma = sigmas[0]
 
-out_dir = 'out_hp_interp'
+highpass_cutoff = 124
+out_dir = f'out_hpff_interp_c{highpass_cutoff}_anim3'
 makedirs(out_dir, exist_ok=True)
 
 out_imgs_unsorted: List[str] = fnmatch.filter(listdir(out_dir), f'*_*.*')
@@ -401,13 +402,14 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 8
+max_batch_size = 36
 
-betweens = 7
+# betweens = 7
+betweens = 59
 
 loop_keyframes = True
 start_seed = 42
-seed_count = 8
+seed_count = 4
 keyframes: List[int] = list(range(start_seed, start_seed+seed_count))
 if loop_keyframes:
   keyframes = [*keyframes, start_seed]
@@ -425,7 +427,6 @@ noise_keyframes = [randn(
 first_frame, *_ = noise_keyframes
 first_frame_dct = dct2(first_frame)
 
-highpass_cutoff = 4
 h_freeze: BoolTensor = torch.arange(latents_shape.height, device=device).unsqueeze(-1) <= highpass_cutoff
 w_freeze: BoolTensor = torch.arange(latents_shape.width, device=device).unsqueeze(0) <= highpass_cutoff
 freeze: BoolTensor = (h_freeze & w_freeze).unsqueeze(0)
