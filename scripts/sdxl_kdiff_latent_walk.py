@@ -71,7 +71,7 @@ sampling_dtype = torch.float32
 # if you're on a Mac: don't bother with this; VRAM and RAM are the same thing.
 swap_models = False
 
-use_wdxl = False
+use_wdxl = True
 
 stability_model_name = 'stabilityai/stable-diffusion-xl-base-0.9'
 wdxl_model_name = 'Birchlabs/waifu-diffusion-xl-unofficial'
@@ -223,23 +223,44 @@ keyframes: List[PromptType] = [
   ) if cfg_scale > 1 else NoCFGPrompts(
     prompt=prompt,
   ) for prompt in [
-    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
-    'the dragon attacks at night, masterpiece, dramatic, highly detailed, high dynamic range',
-    'the dragon attacks Neo-Tokyo at night, masterpiece, dramatic, highly detailed, high dynamic range',
-    'watercolour illustration of Japanese lanterns floating down river, festival, moonlight',
-    'thousands of fireflies on the river at night, moonlight, grass, trees, 4k, dslr, cinematic, masterpiece',
-    'photo of astronaut meditating under waterfall, in swimming shorts, moonlight, breathtaking, 4k, dslr, cinematic, global illumination, realistic, highly detailed',
-    'character portrait of steampunk lady, ponytail, hat, masterpiece, intricate detail',
-    'art of refined steampunk gentleman, wearing suspenders, holding timepiece, monocle, well-groomed beard and moustache',
-    'an explorer struggles to get out of quicksand',
-    'an explorer struggles to get out of quicksand, desert',
-    'illustration of cavemen habitat, cooking pots, sunset, long shadows, wide angle',
-    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto',
-    'photograph of a torii gate in the rain, high up a mountain pass in Kyoto, vaporwave',
-    'fish swimming up waterfall of mercury, aurora borealis',
-    'illustration of gamer girl with blue hair, sitting in chair with knees up, focusing intently on computer',
-    'illustration of gamer girl with pink hair, sitting in chair with knees up, focusing intently on computer',
-    'girl with dragon, flying over water, masterpiece, ghibli, reflection, grinning',
+    # 'beautiful, 1girl, flandre scarlet touhou, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen',
+    # 'beautiful, 1girl, kirisame marisa touhou, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen',
+    # 'beautiful, 1girl, hakurei reimu, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen',
+    # 'beautiful, 1girl, konpaku youmu, detailed hair, portrait, floating hair, waifu, anime, best aesthetic, best quality, ribbon, outdoors, good posture, marker (medium), colored pencil (medium), reddizen',
+    # 'artoria pendragon (fate), carnelian, 1girl, general content, upper body, white shirt, blonde hair, looking at viewer, medium breasts, hair between eyes, floating hair, green eyes, blue ribbon, long sleeves, light smile, hair ribbon, watercolor (medium), traditional media',
+    # 'konpaku youmu, sazanami mio, from side, white shirt, green skirt, silver hair, looking at viewer, small breasts, hair between eyes, floating hair, short hair, neck ribbon, short sleeves, hair ribbon, hairband, bangs, miniskirt, vest, marker (medium), colored pencil (medium)',
+    # ', flandre scarlet, reddizen, 1girl, ascot, blonde hair, blush, bow, closed mouth, collared shirt, hair between eyes, hat, hat bow, looking at viewer, medium hair, mob cap, one side up, orange background, puffy short sleeves, puffy sleeves, red bow, red eyes, red vest, shirt, short sleeves, simple background, sketch, smile, solo, upper body, vest, white headwear, white shirt, yellow ascot',
+    # 'remilia scarlet, reddizen, 1girl, ascot, silver hair, blush, bow, closed mouth, collared shirt, hair between eyes, hat, hat bow, looking at viewer, medium hair, mob cap, one side up, purple background, puffy short sleeves, puffy sleeves, red bow, red eyes, pink vest, shirt, short sleeves, simple background, sketch, smile, solo, upper body, vest, pink headwear, pink shirt, red ascot',
+    # 'masterpiece, best quality, 1girl, green hair, sweater, looking at viewer, upper body, beanie, outdoors, watercolor, night, turtleneck'
+    # 'masterpiece, best quality, 1girl, artoria pendragon (fate), looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, ribbon, outdoors, watercolor',
+    # 'masterpiece, best quality, 1girl, konpaku youmu, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    # 'masterpiece, best quality, 1girl, tohsaka rin, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, bedroom, marker (medium)',
+    # 'masterpiece, best quality, 1girl, hakurei reimu, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors',
+    # 'artoria pendragon (fate), masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, ribbon, outdoors, watercolor',
+    # 'konpaku youmu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    # 'tohsaka rin, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, indoors, marker (medium)',
+    # 'hakurei reimu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors',
+
+    # 'artoria pendragon (fate), masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, ribbon, outdoors, watercolor',
+    # 'kaname madoka, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    # # 'tomoe mami, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, outdoors, colored pencil (medium)',
+    # 'tomoe mami, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, white shirt, outdoors, colored pencil (medium)',
+    # # 'tohsaka rin, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, indoors, marker (medium)',
+    # 'tohsaka rin, masterpiece, best quality, 1girl, looking at viewer, looking at viewer, upper body, indoors, marker (medium)',
+    # # 'matou sakura, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, indoors, marker (medium)',
+    # 'matou sakura, masterpiece, best quality, 1girl, looking at viewer, looking at viewer, upper body, indoors, marker (medium)',
+    # # 'hakurei reimu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors',
+    # 'hakurei reimu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, red dress, outdoors',
+    # 'kirisame marisa, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, white apron, black dress, outdoors',
+
+
+    'artoria pendragon (fate), masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, ribbon, outdoors, watercolor',
+    'kaname madoka, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors, colored pencil (medium)',
+    'tomoe mami, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, medium breasts, white shirt, outdoors, colored pencil (medium)',
+    'tohsaka rin, masterpiece, best quality, 1girl, looking at viewer, looking at viewer, upper body, indoors, marker (medium)',
+    'matou sakura, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, indoors, marker (medium)',
+    'hakurei reimu, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, outdoors',
+    'kirisame marisa, masterpiece, best quality, 1girl, looking at viewer, hair between eyes, floating hair, looking at viewer, upper body, small breasts, white apron, black dress, outdoors',
   ]
 ]
 
@@ -247,7 +268,7 @@ keyframes: List[PromptType] = [
 modifier: QuotientModifier = lambda x:x
 
 interp_specs: List[InterpSpec[InterpManner]] = [InterpSpec[InterpManner](
-  steps=100,
+  steps=30,
   manner=InterpManner(
     quotient_modifier=modifier,
     # SDXL is conditioned on penultimate hidden states, which haven't been normalized.
@@ -272,6 +293,8 @@ frames: List[SampleSpec] = intersperse_linspace(
   make_inbetween=make_inbetween,
   interp_specs=interp_specs,
 )
+
+# frames: List[CFGPrompts] = keyframes
 
 all_zeros_hidden_states: List[Optional[FloatTensor]] = [
   zeros(
