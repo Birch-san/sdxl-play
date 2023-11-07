@@ -10,7 +10,7 @@ from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable, Dict, Any
 from logging import getLogger, Logger
-from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential#, sample_dpmpp_2m_sde, sample_euler, BrownianTreeNoiseSampler
+from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential, sample_dpmpp_3m_sde, BrownianTreeNoiseSampler#, sample_dpmpp_2m_sde, sample_euler
 from os import makedirs, listdir
 from os.path import join
 import fnmatch
@@ -38,7 +38,7 @@ from src.device_ctx import to_device
 from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
-from src.refined_exp_solver import sample_refined_exp_s
+# from src.refined_exp_solver import sample_refined_exp_s
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
 
@@ -372,29 +372,29 @@ else:
 base_denoiser_factory: DenoiserFactory[Denoiser] = denoiser_factory_factory(base_unet_k_wrapped)
 refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory_factory(refiner_unet_k_wrapped) if use_refiner else None
 
-# schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
-# schedule: KarrasScheduleParams = get_template_schedule(
-#   schedule_template,
-#   model_sigma_min=base_unet_k_wrapped.sigma_min,
-#   model_sigma_max=base_unet_k_wrapped.sigma_max,
-#   device=base_unet_k_wrapped.sigmas.device,
-#   dtype=base_unet_k_wrapped.sigmas.dtype,
-# )
+schedule_template = KarrasScheduleTemplate.CudaMasteringMaximizeRefiner
+schedule: KarrasScheduleParams = get_template_schedule(
+  schedule_template,
+  model_sigma_min=base_unet_k_wrapped.sigma_min,
+  model_sigma_max=base_unet_k_wrapped.sigma_max,
+  device=base_unet_k_wrapped.sigmas.device,
+  dtype=base_unet_k_wrapped.sigmas.dtype,
+)
 
-# steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
-# sigmas: FloatTensor = get_sigmas_karras(
-#   n=steps,
-#   sigma_max=sigma_max.cpu(),
-#   sigma_min=sigma_min.cpu(),
-#   rho=rho,
-#   device=device,
-# ).to(sampling_dtype)
-sigmas: FloatTensor = get_sigmas_exponential(
-  n=25,
-  sigma_min=base_unet_k_wrapped.sigma_min,
-  sigma_max=base_unet_k_wrapped.sigma_max,
+steps, sigma_max, sigma_min, rho = schedule.steps, schedule.sigma_max, schedule.sigma_min, schedule.rho
+sigmas: FloatTensor = get_sigmas_karras(
+  n=steps,
+  sigma_max=sigma_max.cpu(),
+  sigma_min=sigma_min.cpu(),
+  rho=rho,
   device=device,
 ).to(sampling_dtype)
+# sigmas: FloatTensor = get_sigmas_exponential(
+#   n=25,
+#   sigma_min=base_unet_k_wrapped.sigma_min,
+#   sigma_max=base_unet_k_wrapped.sigma_max,
+#   device=device,
+# ).to(sampling_dtype)
 
 # here's how to use non-Karras sigmas
 # steps=25
@@ -531,8 +531,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   else:
     denoiser: Denoiser = base_denoiser
 
-  # I've commented-out the noise sampler, because it's only usable with ancestral samplers.
-  # for stable convergence: re-enable this if you decide to use sample_dpmpp_2m_sde.
+  # only usable with ancestral samplers. gives more stable convergence (so you can change step count and get a similar image).
   # for reproducibility: you'll want to use a batch-of-1, to have a seed-per-sample rather than per-batch.
   # noise_sampler = BrownianTreeNoiseSampler(
   #   latents,
@@ -547,10 +546,12 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
 
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
     # denoised_latents: FloatTensor = sample_dpmpp_2m(
-    denoised_latents: FloatTensor = sample_refined_exp_s(
+    # denoised_latents: FloatTensor = sample_refined_exp_s(
+    denoised_latents: FloatTensor = sample_dpmpp_3m_sde(
       denoiser,
       latents,
       sigmas,
+      eta=1.,
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       callback=callback,
     ).to(vae.dtype)
