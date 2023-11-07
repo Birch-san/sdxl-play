@@ -39,6 +39,7 @@ from src.rgb_to_pil import rgb_to_pil
 from src.attn.apply_flash_attn_processor import apply_flash_attn_processor
 from src.attn.flash_attn_processor import FlashAttnProcessor
 from src.refined_exp_solver import sample_refined_exp_s
+from src.sample_ttm import sample_ttm, sample_ttm_jvp
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
 
@@ -78,6 +79,9 @@ unets: List[UNet2DConditionModel] = [UNet2DConditionModel.from_pretrained(
 base_unet: UNet2DConditionModel = unets[0]
 refiner_unet: Optional[UNet2DConditionModel] = unets[1] if use_refiner else None
 
+for unet in unets:
+  unet.disable_gradient_checkpointing()
+
 use_xformers_attn = False
 if use_xformers_attn:
   from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
@@ -90,7 +94,7 @@ if use_flash_attn:
     processor = FlashAttnProcessor()
     unet.set_attn_processor(processor)
 
-use_flash_attn_qkv_packed = True
+use_flash_attn_qkv_packed = False
 if use_flash_attn_qkv_packed:
   for unet in unets:
     apply_flash_attn_processor(unet)
@@ -186,7 +190,9 @@ aesthetic_score = 6.
 negative_aesthetic_score = 2.5
 
 cfg_scale = 12. if use_wdxl else 5.
-cfg_until: Optional[float] = None # 1.1
+# with refiner enabled: 0.3 is probably an okay cutoff
+# base is good as low as 0.4, you can even get away with 0.6
+cfg_until: Optional[float] = None
 refiner_cfg_scale = 5. if use_wdxl else cfg_scale
 # https://arxiv.org/abs/2305.08891
 # Common Diffusion Noise Schedules and Sample Steps are Flawed
@@ -211,7 +217,16 @@ else:
 negative_prompt: Optional[str] = uncond_prompt
 # prompt: str = 'astronaut meditating under waterfall, in swimming shorts'
 # prompt: str = '90s anime sketch, girl wearing serafuku walking home, masterpiece, dramatic, wind'
-prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+# prompt: str = 'photo of astronaut meditating under waterfall, in swimming shorts, breathtaking, 4k, dslr, cinematic, global illumination'
+# prompt: str = 'gamer girl with blue hair wearing bodysuit, focusing intently, ross tran, oil on canvas, masterpiece'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, focusing intently, breathtaking, 4k, dslr, cinematic, global illumination, vaporwave, sunset'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, focusing intently, breathtaking, 4k, dslr, cinematic, global illumination, vaporwave'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, focusing intently, breathtaking, 4k, dslr, cinematic, global illumination'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, breathtaking, 4k, dslr, cinematic, global illumination, vaporwave'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, breathtaking, 4k, dslr, cinematic, global illumination'
+prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, breathtaking, 4k, dslr, cinematic, global illumination, vaporwave, sunset'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, breathtaking, 4k, dslr, cinematic, global illumination, vaporwave'
+# prompt: str = 'photo of gamer girl with long blue hair wearing bodysuit, breathtaking, 4k, dslr, cinematic, global illumination, sunset'
 prompts: List[str] = [
   *([] if negative_prompt is None or cfg_scale == 1. else [negative_prompt]),
   prompt,
@@ -390,7 +405,7 @@ refiner_denoiser_factory: Optional[DenoiserFactory[Denoiser]] = denoiser_factory
 #   device=device,
 # ).to(sampling_dtype)
 sigmas: FloatTensor = get_sigmas_exponential(
-  n=25,
+  n=10,
   sigma_min=base_unet_k_wrapped.sigma_min,
   sigma_max=base_unet_k_wrapped.sigma_max,
   device=device,
@@ -442,10 +457,10 @@ latents_shape = LatentsShape(base_unet.config.in_channels, height_lt, width_lt)
 # we generate with CPU random so that results can be reproduced across platforms
 generator = Generator(device='cpu')
 
-max_batch_size = 2
+max_batch_size = 8
 
-start_seed = 42
-sample_count = 8
+start_seed = 62
+sample_count = 1
 seeds = range(start_seed, start_seed+sample_count)
 
 if not swap_models:
@@ -476,7 +491,7 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   latents *= start_sigma
 
   out_stems: List[str] = [
-    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_{seed}'
+    f'{(next_ix + batch_ix*max_batch_size + sample_ix):05d}_{img_provenance}_{prompt.split(",")[0]}_c{0 if cfg_until is None else cfg_until}_{seed}'
     for sample_ix, seed in enumerate(batch_seeds)
   ]
 
@@ -545,14 +560,17 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
 
   tic: float = perf_counter()
 
-  with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
+  with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=True, enable_flash=False, enable_mem_efficient=False) if torch.cuda.is_available() else nullcontext():
     # denoised_latents: FloatTensor = sample_dpmpp_2m(
-    denoised_latents: FloatTensor = sample_refined_exp_s(
+    # denoised_latents: FloatTensor = sample_refined_exp_s(
+    # denoised_latents: FloatTensor = sample_ttm(
+    denoised_latents: FloatTensor = sample_ttm_jvp(
       denoiser,
       latents,
       sigmas,
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       callback=callback,
+      eta=1.,
     ).to(vae.dtype)
 
   if profile:
