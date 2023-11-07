@@ -10,7 +10,7 @@ from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
 from typing import List, Union, Optional, Callable, Dict, Any
 from logging import getLogger, Logger
-from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential, sample_dpmpp_3m_sde, BrownianTreeNoiseSampler#, sample_dpmpp_2m_sde, sample_euler
+from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential#, sample_dpmpp_3m_sde, BrownianTreeNoiseSampler#, sample_dpmpp_2m_sde, sample_euler
 from os import makedirs, listdir
 from os.path import join
 import fnmatch
@@ -576,13 +576,13 @@ for batch_ix, batch_seeds in enumerate(batched(seeds, max_batch_size)):
   tic: float = perf_counter()
 
   with inference_mode(), to_device(base_unet, device) if swap_models else nullcontext(), sdp_kernel(enable_math=False) if torch.cuda.is_available() else nullcontext():
-    # denoised_latents: FloatTensor = sample_dpmpp_2m(
+    denoised_latents: FloatTensor = sample_dpmpp_2m(
     # denoised_latents: FloatTensor = sample_refined_exp_s(
-    denoised_latents: FloatTensor = sample_dpmpp_3m_sde(
+    # denoised_latents: FloatTensor = sample_dpmpp_3m_sde(
       denoiser,
       latents,
       sigmas,
-      eta=1.,
+      # eta=1.,
       # noise_sampler=noise_sampler, # you can only pass noise sampler to ancestral samplers such as sample_dpmpp_2m_sde
       callback=callback,
     ).to(vae_dtype)
