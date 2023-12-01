@@ -170,7 +170,7 @@ def _refined_exp_sosu_step(
   h: float = lam_next - lam
   a2_1, b1, b2 = _de_second_order(h=h, c2=c2, simple_phi_calc=simple_phi_calc)
   
-  denoised: FloatTensor = model(x, sigma, **extra_args)
+  denoised: FloatTensor = model(x, sigma.expand(x.shape[0]), **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -180,7 +180,7 @@ def _refined_exp_sosu_step(
   lam_2: float = lam + c2_h
   sigma_2: float = lam_2.neg().exp()
 
-  denoised2: FloatTensor = model(x_2, sigma_2, **extra_args)
+  denoised2: FloatTensor = model(x_2, sigma_2.expand(x_2.shape[0]), **extra_args)
   if pbar is not None:
     pbar.update(0.5)
 
@@ -202,7 +202,7 @@ def sample_refined_exp_s(
   extra_args: Dict[str, Any] = {},
   callback: Optional[RefinedExpCallback] = None,
   disable: Optional[bool] = None,
-  ita: FloatTensor = torch.zeros((1,)),
+  ita: FloatTensor = torch.zeros(()),
   c2 = .5,
   noise_sampler: NoiseSampler = torch.randn_like,
   simple_phi_calc = True,
@@ -228,7 +228,7 @@ def sample_refined_exp_s(
   assert sigmas[-1] == 0
   ita = ita.to(x.device)
   with tqdm(disable=disable, total=len(sigmas)-(1 if denoise_to_zero else 2)) as pbar:
-    for i, (sigma, sigma_next) in enumerate(pairwise(sigmas[:-1].split(1))):
+    for i, (sigma, sigma_next) in enumerate(pairwise(sigmas[:-1].unbind())):
       eps: FloatTensor = noise_sampler(x)
       sigma_hat = sigma * (1 + ita)
       x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
@@ -257,7 +257,7 @@ def sample_refined_exp_s(
       eps: FloatTensor = noise_sampler(x)
       sigma_hat = sigma * (1 + ita)
       x_hat = x + (sigma_hat ** 2 - sigma ** 2) ** .5 * eps
-      x_next: FloatTensor = model(x_hat, sigma.to(x_hat.device))
+      x_next: FloatTensor = model(x_hat, sigma.expand(x_hat.shape[0]).to(x_hat.device))
       pbar.update()
       x = x_next
   return x
