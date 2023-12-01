@@ -161,16 +161,57 @@ else:
   }
   vae_name = 'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else default_model_name
 
+SDDecoderImpl = Literal['kdiff-diffusion', 'openai-diffusion']
+sd_decoder_impl: SDDecoderImpl = 'kdiff-diffusion'
+
+roundtrip_via_sd1_diffdec = True
+
 use_consistency_decoder = False
 if use_consistency_decoder:
-  assert interpose_latents_to_sd1, "consistency decoder can only decode SD1 latents, so we'll need the interposer too"
+  assert interpose_latents_to_sd1 or roundtrip_via_sd1_diffdec, "consistency decoder can only decode SD1 latents, so we'll need either the interposer or a roundtrip via the SD VAE encoder"
   assert swap_models, "you're gonna need model-swapping if you wanna fit this thing in memory"
-  # pip install git+https://github.com/openai/consistencydecoder.git
-  from consistencydecoder import ConsistencyDecoder
-  cdecoder = ConsistencyDecoder(device="cuda:0") # Model size: 2.49 GB
-  vae_scaling_factor=0.18215
-  vae_resample_factor=8
-  vae_dtype = torch.float32
+
+  match(sd_decoder_impl):
+    case 'openai-diffusion':
+      # pip install git+https://github.com/openai/consistencydecoder.git
+      from consistencydecoder import ConsistencyDecoder
+      cdecoder = ConsistencyDecoder(device="cuda:0") # Model size: 2.49 GB
+      vae_scaling_factor=0.18215
+      vae_resample_factor=8
+      vae_dtype = torch.float32
+      if roundtrip_via_sd1_diffdec:
+        from diffusers.models.modeling_outputs import AutoencoderKLOutput
+        vae_sd: AutoencoderKL = AutoencoderKL.from_pretrained(
+          'stabilityai/sd-vae-ft-mse',
+          torch_dtype=torch.float16,
+        )
+        def sd_encode(x: FloatTensor) -> FloatTensor:
+          out: AutoencoderKLOutput = vae_sd.encode(x, return_dict=True)
+          dist: DiagonalGaussianDistribution = out.latent_dist
+          latents: FloatTensor = dist.sample(generator=generator)
+          return latents
+    case 'kdiff-diffusion':
+      from diffusers import ConsistencyDecoderVAE
+      from diffusers.models.consistency_decoder_vae import ConsistencyDecoderVAEOutput
+      from diffusers.models.vae import DiagonalGaussianDistribution
+      cvae: ConsistencyDecoderVAE = ConsistencyDecoderVAE.from_pretrained(
+        'openai/consistency-decoder',
+        variant='fp16',
+        torch_dtype=torch.float16,
+      )
+      sd_vae_rng = torch.Generator().manual_seed(42)
+      if roundtrip_via_sd1_diffdec:
+        def sd_encode(x: FloatTensor) -> FloatTensor:
+          out: ConsistencyDecoderVAEOutput = cvae.encode(x, return_dict=True)
+          dist: DiagonalGaussianDistribution = out.latent_dist
+          latents: FloatTensor = dist.sample(generator=generator)
+          return latents
+        sd_encode: Callable[[FloatTensor], FloatTensor] = lambda x: cvae.encode(x, return_dict=False)
+      else:
+        del cvae.encoder
+      cvae.to(device).eval()
+    case _:
+      raise ValueError(f'Unrecognised SD decoder implementation "{sd_decoder_impl}"')
 else:
   vae: AutoencoderKL = AutoencoderKL.from_pretrained(
     vae_name,
