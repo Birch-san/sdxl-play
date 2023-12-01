@@ -2,7 +2,7 @@ import torch
 from torch import no_grad, FloatTensor
 from tqdm import tqdm
 from itertools import pairwise
-from typing import Protocol, Optional, Dict, Any, TypedDict, NamedTuple, Union, List
+from typing import Protocol, Optional, Dict, Any, TypedDict, NamedTuple
 import math
 
 class DenoiserModel(Protocol):
