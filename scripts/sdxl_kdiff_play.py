@@ -8,7 +8,7 @@ import torch
 from torch import BoolTensor, FloatTensor, LongTensor, Generator, inference_mode, cat, randn, tensor, stack
 from torch.nn.functional import pad
 from torch.backends.cuda import sdp_kernel
-from typing import List, Union, Optional, Callable, Dict, Any
+from typing import List, Union, Optional, Callable, Dict, Any, Literal
 from logging import getLogger, Logger
 from k_diffusion.sampling import get_sigmas_karras, sample_dpmpp_2m, get_sigmas_exponential#, sample_dpmpp_3m_sde, BrownianTreeNoiseSampler#, sample_dpmpp_2m_sde, sample_euler
 from os import makedirs, listdir
@@ -42,6 +42,9 @@ from src.attn.flash_attn_processor import FlashAttnProcessor
 from src.latents_to_pils import LatentsToBCHW, LatentsToPils, make_latents_to_bchw, make_latents_to_pils
 from src.log_intermediates import LogIntermediatesFactory, LogIntermediates, make_log_intermediates_factory
 from src.latent_interposer.comfy_latent_interposer import Interposer
+from src.attn.null_attn_processor import NullAttnProcessor
+from src.attn.natten_attn_processor import NattenAttnProcessor
+from src.attn.qkv_fusion import fuse_vae_qkv
 
 logger: Logger = getLogger(__file__)
 
@@ -129,7 +132,7 @@ vit_big_g: CLIPTextModelWithProjection = CLIPTextModelWithProjection.from_pretra
 
 text_encoders: List[CLIPPreTrainedModel] = [vit_l, vit_big_g]
 
-interpose_latents_to_sd1 = True
+interpose_latents_to_sd1 = False
 if interpose_latents_to_sd1:
   from safetensors.torch import load_file
   from huggingface_hub import hf_hub_download
@@ -158,7 +161,7 @@ else:
   }
   vae_name = 'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else default_model_name
 
-use_consistency_decoder = True
+use_consistency_decoder = False
 if use_consistency_decoder:
   assert interpose_latents_to_sd1, "consistency decoder can only decode SD1 latents, so we'll need the interposer too"
   assert swap_models, "you're gonna need model-swapping if you wanna fit this thing in memory"
@@ -174,9 +177,29 @@ else:
     use_safetensors=True,
     **vae_kwargs,
   )
-  # the VAE decoder has a 512-dim self-attention in its mid-block. flash attn isn't supported for such a high dim,
-  # (no GPU has enough SRAM to compute that), so it runs without memory-efficient attn. slicing prevents OOM.
   vae.enable_slicing()
+  vae_attn_impl: Literal['natten', 'null', 'original'] = 'original'
+  match(vae_attn_impl):
+    case 'natten':
+      fuse_vae_qkv(vae)
+      # NATTEN seems to output identical output to global self-attention at kernel size 17
+      # even kernel size 3 looks good (not identical, but very close).
+      # I haven't checked what's the smallest kernel size that can look identical.
+      # should save you loads of memory and compute
+      # (neighbourhood attention costs do not exhibit quadratic scaling with sequence length)
+      vae.set_attn_processor(NattenAttnProcessor(kernel_size=17))
+    case 'null':
+      for attn in [*vae.encoder.mid_block.attentions, *vae.decoder.mid_block.attentions]:
+        # you won't be needing these
+        del attn.to_q, attn.to_k
+      # doesn't mix information between tokens via QK similarity. just projects every token by V and O weights.
+      # looks alright, but is by no means identical to global self-attn.
+      vae.set_attn_processor(NullAttnProcessor())
+    case 'original':
+      # leave it as global self-attention
+      pass
+    case _:
+      raise ValueError('you are spicier than I anticipated')
   # this script won't be using the encoder
   del vae.encoder
   vae_resample_factor: int = 1 << (len(vae.config.block_out_channels) - 1)
