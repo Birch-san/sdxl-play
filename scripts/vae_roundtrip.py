@@ -3,11 +3,11 @@ import torch
 from torch import inference_mode, FloatTensor
 from torchvision.utils import save_image
 from diffusers import AutoencoderKL
-from diffusers.models.autoencoder_kl import DecoderOutput, AutoencoderKLOutput
-from diffusers.models.vae import DecoderOutput, DiagonalGaussianDistribution
+from diffusers.models.autoencoders.autoencoder_kl import DecoderOutput, AutoencoderKLOutput, DiagonalGaussianDistribution
 from PIL import Image
 import numpy as np
 from typing import Literal
+from enum import Enum
 
 from src.attn.null_attn_processor import NullAttnProcessor
 from src.attn.natten_attn_processor import NattenAttnProcessor
@@ -15,18 +15,34 @@ from src.attn.qkv_fusion import fuse_vae_qkv
 
 device = torch.device('cuda')
 
-use_ollin_vae = True
-vae_kwargs: Dict[str, Any] = {
-  'torch_dtype': torch.float16,
-} if use_ollin_vae else {
-  'variant': 'fp16',
-  'subfolder': 'vae',
-  # decoder gets NaN result in float16.
-  'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
-}
+class VAEChoice(Enum):
+  Ollin = 'ollin'
+  SDXL = 'sdxl'
+  Flux = 'flux'
+
+vae_choice = VAEChoice.Flux
+match vae_choice:
+  case VAEChoice.Ollin:
+    vae_descriptor = 'madebyollin/sdxl-vae-fp16-fix'
+    vae_kwargs: Dict[str, Any] = {
+      'torch_dtype': torch.float16,
+    }
+  case VAEChoice.SDXL:
+    vae_descriptor = 'stabilityai/stable-diffusion-xl-base-0.9'
+    vae_kwargs: Dict[str, Any] = {
+      'variant': 'fp16',
+      'subfolder': 'vae',
+      'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+    }
+  case VAEChoice.Flux:
+    vae_descriptor = 'black-forest-labs/FLUX.1-schnell'
+    vae_kwargs: Dict[str, Any] = {
+      'subfolder': 'vae',
+      'torch_dtype': torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+    }
 
 vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-  'madebyollin/sdxl-vae-fp16-fix' if use_ollin_vae else 'stabilityai/stable-diffusion-xl-base-0.9',
+  vae_descriptor,
   use_safetensors=True,
   **vae_kwargs,
 )
@@ -82,4 +98,4 @@ with inference_mode():
 
 sample: FloatTensor = decoder_out.sample.div(2).add_(.5).clamp_(0,1)
 
-save_image(sample, f'out.{attn_impl}.png')
+save_image(sample, f'out.{vae_choice.value}.{attn_impl}.png')
